@@ -1,0 +1,649 @@
+---
+title: "20210517_bayesian_reg_inla"
+author: "Guillermina Senn"
+date: "5/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+library(INLA)
+library(brinla)
+
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(car)
+library(MASS)
+library(ranger)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(GGally)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+
+## 1. Cargar y pre-procesar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+```
+```{r}
+st_geometry(data) <- data$geom
+```
+
+```{r}
+tm_shape(data) + 
+  tm_fill('id_unico', title = 'Polygon ID', palette = 'Reds') +
+  tm_borders(col = 'white', lwd = 0.1) +
+  tm_layout('Area of study',
+          legend.title.size = 1,
+          legend.text.size = 0.6,
+          legend.position = c("left","top"),
+          legend.bg.color = "white",
+          legend.bg.alpha = 1,
+          legend.outside = TRUE,
+          frame = FALSE)
+# tmaptools::palette_explorer()
+```
+
+
+```{r}
+ndvi <- names(data)[grepl('NDVI', names(data))]
+cols_mediana <- names(data)[grepl('Mediana_', names(data))]
+cols_min <- names(data)[grepl('Minimo_', names(data))]
+cols_max <- names(data)[grepl('Maximo_', names(data))]
+cols_cv <- names(data)[grepl('CV_', names(data))]
+cero <- c('Salina_Porc', 'Plantaciones.perennes..frutales..de.secano_Porc',
+          'Plantaciones.perennes..frutales..irrigadas_Porc')
+aliased <- c('Plantaciones.forestales.maderables_Porc', 'CO_veg')
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label", 'id_unico', 'geom')
+respuestas <- c("Media_ESPI.Mean", 'Media_tCOSha', 'CO_veg')
+lpd <- names(data)[grepl('LPD', names(data))]
+```
+
+
+
+
+## 2. Modelado
+
+### 2.1 OLS: ESPI.LTT, original, poly
+
+  Solo quito:
+
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+  Pero le agrego un termino cuadratico a:
+  * Cuerpos de agua
+  * Recurrencia
+  * DEM
+  * VUT
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.5 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.5)
+```
+
+  Ajusto un modelo lineal sin interacciones.
+  
+```{r}
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+
+```
+
+```{r}
+lm1.5 <- lm(
+  formula = formula1,
+  data = data1.5,
+  na.action = na.exclude
+)
+sum1.5 <- summary(lm1.5)
+coef1.5 <- data.frame(round(sum1.5$coefficients, 6))
+coef1.5$varname <- row.names(coef1.5)
+# names(coef1.5) <- c('coef1.5', 'varname')
+coef1.5 <- coef1.5[, c(1, 2, 4, 5)]
+data1.5$res_lm1.5 <- residuals(lm1.5)
+```
+
+  
+```{r}
+data1.5_vgm = data1.5[complete.cases(data1.5), ]
+coordinates(data1.5_vgm) = c('lat', 'lon')
+
+vgm <- variogram(
+  object = res_lm1.5 ~ 1,
+  data = data1.5_vgm
+)
+plot(vgm, pch = 16, cex = 0.6, xlim = c(0, 100))
+```
+
+
+
+### 2.2 Bayesiana. Original, poly, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+
+```{r}
+bay_inla.10 <- inla(
+  formula = formula1,
+  data = data1.5,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.10)
+```
+
+```{r}
+coef.10 <- round(bay_inla.10$summary.fixed, 5)
+coef.10$varname <- row.names(coef.10)
+coef.10
+```
+
+
+```{r}
+merge(
+  x = coef1.5,
+  y = coef.10
+) %>%
+  arrange(Pr...t..)
+```
+  Veamos la distribucion marginal a posteriori de la precision:
+
+```{r}
+# bay_inla.10$summary.hyperpar
+plot(bay_inla.10$marginals.hyperpar$`Precision for the Gaussian observations`,
+     type = 'l')
+title(main='precision')
+```
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.10$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(usair.inla1)
+```
+  Comparemos el desvio estandar residual entre el LM y el bayesiano:
+  
+```{r}
+sum1.5$sigma
+round(bri.hyperpar.summary(bay_inla.10), 3)
+```
+
+  Si quiero ver los predichos, en realidad obtengo una distribucion de probabilidad para cada uno.
+  
+  Voy a hacer una prueba: voy a duplicar observaciones y les voy a borrar la respuesta.
+  
+```{r}
+temp <- data1.5[c(100:102), ]
+temp$Media_ESPI.LTT <- NA
+data1.5_pred <- rbind(data1.5, temp)
+link10 <- c(rep(NA, nrow(data1.5)), 
+            rep(1, nrow(temp)))
+bay_inla.10_pred <- inla(
+  formula = formula1,
+  data = data1.5_pred,
+  control.predictor = list(link = link10),
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+```
+  
+  Ahora me fijo que me predijo, y comparo con el valor real.
+```{r}
+bay_inla.10_pred$summary.fitted.values[(nrow(data1.5)+1):nrow(data1.5_pred),]
+```
+  No son exactamente iguales las estimaciones.
+  
+```{r}
+data1.5[c(100:102), c('Media_ESPI.LTT')]
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.10$dic$dic
+```
+
+  Veamos los p-values predictivos a posteriori:
+  
+```{r}
+bay_inla.10_pred2 <- inla(
+  formula = formula1, 
+  data = data1.5, 
+  control.predictor = list(link = 1, compute = TRUE)
+)
+post.predicted.pval <- vector(
+  mode = "numeric", 
+  length = nrow(data1.5)
+)
+```
+
+  Para cada observacion obtengo el ppp, buscando el cuantil en el que cae el valor observado en la distribucion de probabilidad marginal
+```{r}
+for(i in (1:nrow(data1.5))){
+  post.predicted.pval[i] <- inla.pmarginal(
+    q = data1.5$Media_ESPI.LTT[i], 
+    marginal = bay_inla.10_pred2$marginals.fitted.values[[i]]
+  )
+}
+hist(
+  x = post.predicted.pval, 
+  main = "", 
+  breaks = 10, 
+  xlab = "Posterior predictive p-value"
+)
+```
+  Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.10$cpo$failure)
+hist(
+  x = bay_inla.10$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.10$cpo$pit))), 
+       bay_inla.10$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.10$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+plot(
+  bay_inla.10$cpo$cpo, 
+  bay_inla.10$cpo$cpo, 
+  xlab="CPO for the full model", 
+  ylab="CPO for the reduced model")
+abline(0,1)
+```
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.10)
+bri.lmresid.plot(bay_inla.10, bay_inla.10$Media_ARCILLA, xlab = "MO")
+bri.lmresid.plot(bay_inla.10, bay_inla.10$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+### 2.3 ESPI.LTT: Bayesian ridge regression, orig, poly
+
+  Primero estandaricemos las variables:
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data_temp <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) %>%
+  dplyr::select(-Media_ESPI.LTT)
+data_temp <- scale(data_temp)
+data1.11 <- data.frame(cbind(data$Media_ESPI.LTT, data_temp))
+names(data1.11)[1] <- 'Media_ESPI.LTT'
+data1.11
+```
+  
+  Ahora ajustemos una ridge regression con INLA. Es medio manual. 
+  
+  Para cada coeficiente que queremos estimar hay que crear una columna con un numero que lo identifique. En este caso tengo 47 coeficientes + el intercept.
+  
+```{r}
+n <- nrow(data1.11)
+data1.11$beta1 <- rep(1,n)
+data1.11$beta2 <- rep(2,n)
+data1.11$beta3 <- rep(3,n)
+data1.11$beta4 <- rep(4,n)
+data1.11$beta5 <- rep(5,n)
+data1.11$beta6 <- rep(6,n)
+data1.11$beta7 <- rep(7,n)
+data1.11$beta8 <- rep(8,n)
+data1.11$beta9 <- rep(9,n)
+data1.11$beta10 <- rep(10,n)
+data1.11$beta11 <- rep(11,n)
+data1.11$beta12 <- rep(12,n)
+data1.11$beta13 <- rep(13,n)
+data1.11$beta14 <- rep(14,n)
+data1.11$beta15 <- rep(15,n)
+data1.11$beta16 <- rep(16,n)
+data1.11$beta17 <- rep(17,n)
+data1.11$beta18 <- rep(18,n)
+data1.11$beta19 <- rep(19,n)
+data1.11$beta20 <- rep(20,n)
+data1.11$beta21 <- rep(21,n)
+data1.11$beta22 <- rep(22,n)
+data1.11$beta23 <- rep(23,n)
+data1.11$beta24 <- rep(24,n)
+data1.11$beta25 <- rep(25,n)
+data1.11$beta26 <- rep(26,n)
+data1.11$beta27 <- rep(27,n)
+data1.11$beta28 <- rep(28,n)
+data1.11$beta29 <- rep(29,n)
+data1.11$beta30 <- rep(30,n)
+data1.11$beta31 <- rep(31,n)
+data1.11$beta32 <- rep(32,n)
+data1.11$beta33 <- rep(33,n)
+data1.11$beta34 <- rep(34,n)
+data1.11$beta35 <- rep(35,n)
+data1.11$beta36 <- rep(36,n)
+data1.11$beta37 <- rep(37,n)
+data1.11$beta38 <- rep(38,n)
+data1.11$beta39 <- rep(39,n)
+data1.11$beta40 <- rep(40,n)
+data1.11$beta41 <- rep(41,n)
+data1.11$beta42 <- rep(42,n)
+data1.11$beta43 <- rep(43,n)
+data1.11$beta44 <- rep(44,n)
+data1.11$beta45 <- rep(45,n)
+data1.11$beta46 <- rep(46,n)
+data1.11$beta47 <- rep(47,n)
+```
+
+  Luego tengo que especificar la prior, que en este caso sera una gaussiana no informativa. Uso la misma para todos los parametros con el argumento `copy`. Escribo la formula:
+  
+```{r}
+param.beta = list(prec = list(param = c(1.0e-3, 1.0e-3)))
+formula.ridge = Media_ESPI.LTT ~ f(beta1, Media_ARCILLA , model="iid", 
+                                   values = c(1:47), hyper = param.beta) + 
+  f(beta2, Media_ARENA , copy = "beta1", fixed = T) + 
+  f(beta3, Media_CC, copy = "beta1", fixed = T) + 
+  f(beta4, Media_CE, copy = "beta1", fixed = T) + 
+  f(beta5, Media_CEextsat, copy = "beta1", fixed = T) + 
+  f(beta6, Media_CIC, copy = "beta1", fixed = T) + 
+  f(beta7, Media_CO, copy = "beta1", fixed = T) + 
+  f(beta8, Media_Cu, copy = "beta1", fixed = T) + 
+  f(beta9, Media_Fe, copy = "beta1", fixed = T) + 
+  f(beta10, Media_K, copy = "beta1", fixed = T) + 
+  f(beta11, Media_LIMO, copy = "beta1", fixed = T) + 
+  f(beta12, Media_Mg, copy = "beta1", fixed = T) + 
+  f(beta13, Media_Mn, copy = "beta1", fixed = T) + 
+  f(beta14, Media_Na, copy = "beta1", fixed = T) + 
+  f(beta15, Media_Nt, copy = "beta1", fixed = T) + 
+  f(beta16, Media_P, copy = "beta1", fixed = T) + 
+  f(beta17, Media_pH, copy = "beta1", fixed = T) + 
+  f(beta18, Media_Zn, copy = "beta1", fixed = T) + 
+  f(beta19, Monte_Porc, copy = "beta1", fixed = T) + 
+  f(beta20, Arbustales.y.matorrales_Porc, copy = "beta1", fixed = T) + 
+  f(beta21, Pastizal.natural_Porc, copy = "beta1", fixed = T) + 
+  f(beta22, Pastizal.natural.con.rocas.o.suelo.desnudo_Porc, copy = "beta1", fixed = T) +
+  f(beta23, Rocas_Porc, copy = "beta1", fixed = T) +
+  f(beta24, Suelo.desnudo_Porc, copy = "beta1", fixed = T) +
+  f(beta25, Cuerpos.de.agua_Porc, copy = "beta1", fixed = T) +
+  f(beta26, I(Cuerpos.de.agua_Porc^2), copy = "beta1", fixed = T) +
+  f(beta27, Zonas.anegables_Porc, copy = "beta1", fixed = T) +
+  f(beta28, Cursos.de.agua_Porc, copy = "beta1", fixed = T) +
+  f(beta29, Zona.urbana.consolidada_Porc, copy = "beta1", fixed = T) +
+  f(beta30, Zona.urbana.en.proceso.de.consolidación_Porc, copy = "beta1", fixed = T) +
+  f(beta31, Zona.urbana.sin.consolidar_Porc, copy = "beta1", fixed = T) +
+  f(beta32, Infraestructura.vial_Porc, copy = "beta1", fixed = T) +
+  f(beta33, Actividades.invernales_Porc, copy = "beta1", fixed = T) +
+  f(beta34, Actividades.estivales_Porc, copy = "beta1", fixed = T) +
+  f(beta35, Actividades.anuales..doble.ciclo._Porc, copy = "beta1", fixed = T) +
+  f(beta36, Sin.actividad.significativa_Porc, copy = "beta1", fixed = T) +
+  f(beta37, Cultivos.anuales.irrigados_Porc, copy = "beta1", fixed = T) +
+  f(beta38, Pasturas.implantadas_Porc, copy = "beta1", fixed = T) +
+  f(beta39, Pasturas.naturales.manejadas_Porc, copy = "beta1", fixed = T) +
+  f(beta40, Media_DEM, copy = "beta1", fixed = T) +
+  f(beta41, I(Media_DEM^2), copy = "beta1", fixed = T) +
+  f(beta42, Media_MO, copy = "beta1", fixed = T) +
+  f(beta43, Media_PEND, copy = "beta1", fixed = T) +
+  f(beta44, Media_Recurrecia, copy = "beta1", fixed = T) +
+  f(beta45, I(Media_Recurrecia^2), copy = "beta1", fixed = T) +
+  f(beta46, Media_VUT, copy = "beta1", fixed = T) +
+  f(beta47, I(Media_VUT^2), copy = "beta1", fixed = T) 
+  
+```
+  
+  Ajusto el modelo ridge:
+```{r}
+bay_inla.11 <- inla(
+  formula = formula.ridge, 
+  data = data1.11
+)
+```
+
+```{r}
+ridge.est <- rbind(
+  bay_inla.11$summary.fixed, 
+  bay_inla.11$summary.random$beta1[,-1]
+)
+ridge.est$varname <- row.names(coef1.5)
+```
+
+```{r}
+final_coef <- merge(
+  x = coef1.5,
+  y = coef.10
+) 
+final_coef <- merge(
+  final_coef,
+  ridge.est,
+  by = c('varname')
+)
+final_coef[, c('varname', 'Pr...t..', 'Estimate', 'mean.x', 'mean.y', 
+               'Std..Error', 'sd.x', 'sd.y')] %>%
+  arrange(Pr...t..)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

@@ -1,0 +1,635 @@
+---
+title: "interpolating_ESPI.LTT"
+author: "Guillermina Senn"
+date: "5/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, echo=FALSE, warning=FALSE}
+library(lubridate) #data wrangling
+library(dplyr)
+library(sp) #spatial data wrangling & analysis
+library(rgdal) #spatial data wrangling
+library(rgeos) #spatial data wrangling
+library(raster) #spatial raster data wrangling
+library(gstat) #kriging and geostatistics
+library(tmap) #modern data visualizations
+library(leaflet) #modern data visualizations
+library(mapview)
+```
+
+
+## 1. Get the data
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+```
+
+
+## 2. Data wrangling
+
+  Extract centroids and create new geostatistical data instead of areal data.
+  
+```{r}
+st_geometry(data) <- data$geom
+centroids <- st_centroid(data)
+coords <- st_coordinates(centroids$geom)
+datag = data.frame(data)
+datag$lat <- coords[, 1]
+datag$lon <- coords[, 2]
+class(datag)
+```
+
+```{r}
+coordinates(datag) <- datag[, c("lat", "lon")]
+proj4string(datag) <- CRS("+init=epsg:4326")
+class(datag)
+dim(datag)
+```
+
+## 3. Plots
+
+```{r}
+tmap_mode('view')
+tm_shape(datag) + tm_dots()
+```
+
+  Overlay community areas from another dataset.
+  
+```{r}
+# chiCA <- readOGR("Data","ChiComArea")
+# qtm(chiCA)
+```
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+
+st_geometry(data) <- data$geom
+qtm(shp = data, fill = 'id_unico')
+```
+
+```{r}
+tmap_mode("view")
+tm_shape(data) + 
+  tm_borders() + 
+  tm_shape(datag) +
+  tm_dots(col = "Media_ESPI.LTT", size = 0.05, title = "ESPI LTT") 
+```
+
+## 4. Interpolacion 
+
+  Interpolemos la superficie del ESPI LTT. 
+  Primero hago los veriogramas para modelar la distribucion del ESPI LTT. Luego genero una grilla sobre el area de la cuenca y usando un modelo de variograma aplicamos kriging para predecir una superficie del ESPI LTT.
+  
+  Un variograma es una funcion que describe el grado de dependencia espacial y continuidad a traves de los datos. 
+  
+```{r}
+espi.vgm <- variogram(
+  object = Media_ESPI.LTT ~ 1, 
+  data = datag
+)
+plot(espi.vgm, cex = 0.6, pch = 16)
+```
+
+### 4.1 Esferico
+
+  Probemos un modelo esferico:
+  
+```{r}
+espi.fit.sph <- fit.variogram(
+  object = espi.vgm,
+  model = vgm('Sph')
+)
+plot(espi.vgm, espi.fit.sph, cex = 0.6, pch = 16)
+```
+  
+  Generamos la grilla de prediccion usando la funcion `pt2grid`, que genera una grilla a partir de un dataframe espacial para n celdas.
+  
+```{r}
+pt2grid <- function(ptframe, n) {
+  bb <- bbox(ptframe)  
+  ptcrs <- proj4string(ptframe)  
+  xrange <- abs(bb[1,1] - bb[1,2])  
+  yrange <- abs(bb[2,1] - bb[2,2])  
+  cs <- c(xrange/n, yrange/n)  
+  cc <- bb[,1] + (cs/2)  
+  dc <- c(n,n)  
+  x1 <- GridTopology(cellcentre.offset=cc,cellsize=cs,cells.dim=dc)  
+  x2 <- SpatialGrid(grid=x1,proj4string=CRS(ptcrs))
+  return(x2)
+}
+```
+
+  Generemos una grilla 100x100 sobre el area de las comunidades de Chicago.
+  
+```{r}
+cuenca.grid <- pt2grid(as(data, 'Spatial'), 200)
+plot(cuenca.grid)
+```
+  
+  Preparamos los datos para kriging. Primero nos aseguramos que los datos esten en la misma proyeccion.
+  
+```{r}
+data <- as(data, 'Spatial')
+projection(cuenca.grid) <- CRS("+init=epsg:4326")  
+projection(datag) <-  CRS("+init=epsg:4326")
+projection(data) <- CRS("+init=epsg:4326")
+```
+
+
+  Aplicamos kriging usando el modelo esferico.
+  
+```{r}
+espi.kriged <- krige(
+  formula = datag$Media_ESPI.LTT ~ 1,
+  datag,
+  cuenca.grid,
+  model = espi.fit.sph,
+  nmax = 40
+)
+plot(espi.kriged)
+```
+ 
+  Clip:
+```{r}
+cuenca.espi.kriged.sph <- espi.kriged[data, ]
+plot(cuenca.espi.kriged.sph)
+```
+  
+  Ploteamos en mapa:
+  
+```{r}
+tm_shape(cuenca.espi.kriged.sph) +
+  tm_raster(col = "var1.pred", style = "jenks", 
+            title = "ESPI LTT", palette = "BuPu") +
+  tm_layout(main.title = "ESPI LTT Interpolation", 
+            main.title.size = 1.1) +
+  tm_legend(position = c("left", "bottom"))
+```
+```{r}
+tm_shape(cuenca.espi.kriged.sph) +
+  tm_raster(col = "var1.var", style = "jenks", 
+            title = "ESPI LTT Var", palette = "BuPu") +
+  tm_layout(main.title = "ESPI LTT Interpolation", 
+            main.title.size = 1.1) +
+  tm_legend(position = c("left", "bottom"))
+```
+
+### 3.2 Exponential kriging
+
+```{r}
+espi.fit.exp<- fit.variogram(
+  object = espi.vgm, 
+  model = vgm("Exp")
+)
+plot(espi.vgm, espi.fit.exp)
+```
+
+
+
+  Aplicamos kriging usando el modelo exponencial
+  
+```{r}
+espi.kriged.exp <- krige(
+  formula = datag$Media_ESPI.LTT ~ 1,
+  datag,
+  cuenca.grid,
+  model = espi.fit.exp,
+  nmax = 40
+)
+plot(espi.kriged.exp)
+```
+
+
+```{r}
+cuenca.espi.kriged.exp <- espi.kriged.exp[data, ]
+tm_shape(cuenca.espi.kriged) +
+  tm_raster(col = "var1.pred", style = "jenks", 
+            title = "ESPI LTT", palette = "BuPu") +
+  tm_layout(main.title = "ESPI LTT Interpolation", 
+            main.title.size = 1.1) +
+  tm_legend(position = c("left", "bottom"))
+```
+
+  Miro la varianza de prediccion:
+  
+```{r}
+cuenca.espi.kriged.exp <- espi.kriged.exp[data, ]
+tm_shape(cuenca.espi.kriged) +
+  tm_raster(col = "var1.var", style = "jenks", 
+            title = "ESPI LTT Var", palette = "BuPu") +
+  tm_layout(main.title = "ESPI LTT Interpolation", 
+            main.title.size = 1.1) +
+  tm_legend(position = c("left", "bottom"))
+```
+## 5 Kriging con CV leave-one-out
+
+  Para hacer leave-one-out, en nfold, pongamos la cantidad de datos - 1:
+  
+```{r}
+set.seed(17)
+espi.kriged.cv.exp <- krige.cv(
+  formula = Media_ESPI.LTT ~ 1,
+  locations = datag,
+  model = espi.fit.exp,
+  nmax = 40,
+  nfold = nrow(datag)
+)
+```
+
+```{r}
+set.seed(17)
+espi.kriged.cv.sph <- krige.cv(
+  formula = Media_ESPI.LTT ~ 1,
+  locations = datag,
+  model = espi.fit.sph,
+  nmax = 40,
+  nfold = nrow(datag)
+)
+```
+
+```{r}
+par(mfrow = c(1,2))
+bubble(espi.kriged.cv.sph, "residual", main = "Residuos Esferico") 
+bubble(espi.kriged.cv.exp, "residual", main = "Residuos Exponencial")
+```
+
+
+
+## 6. Errores de prediccion
+
+  **Error medio** de predicción (ME), cercano a cero mejor:
+  
+```{r}
+mean(espi.kriged.cv.sph$residual)
+mean(espi.kriged.cv.exp$residual)
+```
+
+
+  **Error medio absoluto (MAE)**
+  
+```{r}
+mean(abs(espi.kriged.cv.sph$residual))
+mean(abs(espi.kriged.cv.exp$residual))
+```
+
+
+  **Error cuadratico medio** de predicción (MSE), mas pequeño mejor:
+  
+```{r}
+mean(espi.kriged.cv.sph$residual^2)
+mean(espi.kriged.cv.exp$residual^2)
+```
+
+
+  **Mean squared deviation ratio (MSDR)**; error cuadratico medio normalizado, cercano a 1 mejor:
+```{r}
+mean(espi.kriged.cv.sph$zscore^2)
+mean(espi.kriged.cv.exp$zscore^2)
+```
+
+
+  **RMSE** relativo a la media:
+  
+```{r}
+sqrt(mean(espi.kriged.cv.sph$residual^2))/mean(espi.kriged.cv.sph$observed)*100
+sqrt(mean(espi.kriged.cv.exp$residual^2))/mean(espi.kriged.cv.exp$observed)*100
+```
+
+
+## 7. Kriging con deriva externa 
+
+  Ajuste de semivariograma experimental del ESPI.LTT:
+```{r}
+espi.vgm.drift <- variogram(
+  object = Media_ESPI.LTT ~ Media_DEM, 
+  data = datag,
+  # cutoff = 1000
+)
+plot(espi.vgm.drift, cex = 0.6, pch = 16)
+```
+
+  Ajusto un modelo al semivariograma en funcion de las covariables:
+
+```{r}
+espi.fit.exp.drift <- fit.variogram(
+  object = espi.vgm,
+  model = vgm('Exp')
+)
+plot(espi.vgm.drift, espi.fit.exp.drift, cex = 0.6, pch = 16)
+```
+```{r}
+espi.fit.sph.drift <- fit.variogram(
+  object = espi.vgm,
+  model = vgm('Sph')
+)
+plot(espi.vgm.drift, espi.fit.sph.drift, cex = 0.6, pch = 16)
+```
+
+```{r}
+espi.fit.gau.drift <- fit.variogram(
+  object = espi.vgm,
+  model = vgm('Gau')
+)
+plot(espi.vgm.drift, espi.fit.gau.drift, cex = 0.6, pch = 16)
+```
+
+  Creemos grilla de prediccion que contenga los valores de DEM:
+  
+```{r}
+dem.vgm <- variogram(
+  object = Media_DEM ~ 1, 
+  data = datag
+)
+plot(dem.vgm, cex = 0.6, pch = 16, xlim = c(0, 1000))
+```
+
+```{r}
+dem.fit.exp<- fit.variogram(
+  object = dem.vgm, 
+  model = vgm("Exp")
+)
+plot(dem.vgm, dem.fit.exp)
+```
+
+  Aplicamos kriging usando el modelo exponencial
+  
+```{r}
+dem.kriged.exp <- krige(
+  formula = datag$Media_DEM ~ 1,
+  datag,
+  cuenca.grid,
+  model = dem.fit.exp,
+  nmax = 40
+)
+plot(dem.kriged.exp)
+```
+  Guardamos los resultados en la grilla:
+```{r}
+cuenca.grid$Media_DEM <- dem.kriged.exp$var1.pred
+
+names(cuenca.grid)
+```
+
+
+
+  Ajustamos kriging:
+```{r}
+espi.kriged.exp.drift <- krige(
+  formula = Media_ESPI.LTT ~ Media_DEM,
+  datag,
+  cuenca.grid,
+  model = espi.fit.exp.drift,
+  nmax = 40,
+  na.action = na.pass
+)
+plot(espi.kriged.exp.drift)
+names(espi.kriged.exp.drift)
+```
+
+
+## 8. Kriging Regresión 
+
+  Ajuste de modelo de RLM:
+  
+```{r}
+formula <- Media_ESPI.LTT ~ Media_DEM 
+mlr <- lm(
+  formula = formula, 
+  data = datag
+)
+summary(mlr)
+```
+
+  Incorporamos los residuos del MLR a la base de datos:
+```{r setup, include=FALSE}
+datag$residuos <- mlr$residuals
+# names(datag)
+```
+
+  Ajuste de semivariograma experimetal y teórico a los residuos:
+
+```{r setup, include=FALSE}
+res.vgm <- variogram(
+  object = residuos ~ 1 , 
+  data = datag
+)
+plot(res.vgm, pch = 16, cex = 0.6)
+```
+
+```{r}
+res.vgm.exp <- fit.variogram(
+  object = res.vgm, 
+  model = vgm("Exp")
+)
+plot(res.vgm, res.vgm.exp)
+```
+
+
+  Kriging sobre residuos: 
+```{r setup, include=FALSE}
+kgres <- krige(
+  formula = residuos ~ 1, 
+  datag, 
+  cuenca.grid, 
+  model = res.vgm.exp
+)
+spplot(
+  obj = kgres["var1.pred"], 
+  main = "Kriging Residual: Predicciones", 
+  col.regions=terrain.colors(20)
+)
+```
+
+
+  Predicción final
+```{r}
+# las predicciones son la suma del predicho del MLR y del predicho del kriging sobre los residuos
+cuenca.grid$RK_pred <- predict(mlr, newdata = cuenca.grid) + kgres$var1.pred
+
+spplot(
+  obj = cuenca.grid["RK_pred"], 
+  main = "Predicción RK", 
+  col.regions=terrain.colors(20)
+)
+```
+
+  
+```{r}
+cuenca.espi.reg.krig.exp <- kgres[data, ]
+tm_shape(cuenca.espi.reg.krig.exp) +
+  tm_raster(col = "var1.pred", style = "jenks", 
+            title = "ESPI LTT Pred", palette = "BuPu") +
+  tm_layout(main.title = "ESPI LTT Interpolation", 
+            main.title.size = 1.1) +
+  tm_legend(position = c("left", "bottom"))
+```
+
+
+## 9. Random Forest Kriging
+
+```{r setup, include=FALSE}
+seed <-7
+mtry <- sqrt(ncol(datag))
+tunegrid <-expand.grid(.mtry = mtry)
+
+#  Opciones de validacion
+library(caret)
+fitControl <- trainControl(method = "cv", number = 3, allowParallel = F)
+```
+
+```{r}
+# opciones para praralelizado 
+# library(parallel)
+# library(doParallel)
+# cluster <- makeCluster(detectCores() - 1) 
+# registerDoParallel(cluster)
+```
+
+  Ajuste:
+```{r}
+set.seed(1)
+train_rf <- train(
+  Media_ESPI.LTT ~ Media_DEM, 
+  data = as.data.frame(datag),
+  method = "rf",
+  importance = T,
+  tuneGrid = tunegrid,
+  trControl = fitControl
+)
+summary(train_rf)
+```
+
+ Incorporamos los residuos del RF a la base de datos
+
+```{r setup, include=FALSE}
+datag$residuosRF <- datag$Media_ESPI.LTT - predict(train_rf, newdata = datag)
+```
+
+  Ajuste de semivariograma experimetal y teórico a los residuos del RF:
+  
+```{r setup, include=FALSE}
+# coordinates(datos) <- c("x", "y")
+# crs(datos) <- CRS("+init=epsg:22174")
+
+semiv_RFk <- variogram(
+  object = residuosRF ~ 1 , 
+  data = datag
+)
+plot(semiv_RFk)
+
+v.fit_vut_RFk <- fit.variogram(
+  object = semiv_RFk ,
+  model = vgm("Exp")
+)
+plot(semiv_RFk, v.fit_vut_RFk)
+```
+
+  Kriging sobre residuos del RF:
+  
+```{r setup, include=FALSE}
+kgresRF <- krige(
+  formula = residuosRF ~ 1, 
+  datag, 
+  cuenca.grid, 
+  model = v.fit_vut_RFk
+)
+spplot(
+  obj = kgresRF["var1.pred"], 
+  main = "Kriging Residual (RF): Predicciones", 
+  col.regions=terrain.colors(20)
+)
+```
+
+
+  Predicción final RF:
+  
+```{r setup, include=FALSE}
+cuenca.grid$RFK_pred <- predict(train_rf, newdata = cuenca.grid) + kgresRF$var1.pred
+spplot(ejes["RFK_pred"], main = "Predicción RFK", col.regions = terrain.colors(20))
+
+mapapredejes_RFK <- mapview(cuenca.grid, zcol = "RFK_pred", ceX ="RFK_pred",col.regions =  cols, layer.name ="Predicho Ejes RFK", alpha=0)
+
+muestra +  mapapred_grilla + mapapred_ejes +  mapapred_ejesRK + mapapredejes_RFK
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

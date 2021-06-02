@@ -1,0 +1,710 @@
+---
+title: "sf_tutorial"
+author: "Guillermina Senn"
+date: "5/4/2021"
+output: html_document
+  ---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(sf)
+```
+
+  [https://r-spatial.github.io/sf/articles/sf1.html]
+  
+  For visualizing: [https://r-spatial.github.io/sf/articles/sf5.html]
+  
+  `sf` stands for 'Simple Features'. `sf` is the expected succesor of `sp` and consists of an implementation of simple features for `R`, which are the current standard. 
+  
+### What is a Feature
+
+  **Definition:** *A simple feature is defined by the OpenGIS Abstract specification to have both spatial and non-spatial attributes. Spatial attributes are geometry valued, and simple features are based on 2D geometry with linear interpolation between vertices.*
+  
+  A feature is an object in the real world (e.g. a building) that can consist of other features (objects). Features have:
+  
+  * a geometry describing its location on Earth;
+  * attributes.
+  
+Example: a tree is a feature; the geometry of the tree could be a point indicating its centre, and its attributes could be its height and colour. 
+
+  All geometries are composed of points in 2, 3 or 4 dimensional space. 2D points or XY refer to x and y (easting/northing, long/lat). Third coordinate is Z, the altitude. The fourth coordinate, `M`, denotes a measure associated with the point, such as time or measurement error.
+
+**Geometry tipes of SF**
+
+  The most common 7 types of simple features are:
+
+  1. point (0D geometry);
+  2. linestring (sequence of points connected by straight lines. 1D geometry.);
+  3. polygon (positive 2D area. Sequence of points that form a closed exterior ring and optionally subsequent rings to denote holes);
+  4. multipoint;
+  5. multilinestring;
+  6. multipolygon; and
+  7. geometrycollection (set of geometries of any type).
+  
+  4, 5, and 6 are the set of points, lines and polygons respectively. An empty geometry is the analogue of a missing (NA) attribute. There are other geometries such as `TRIANGLE`, `SURFACE` and `CURVE`.
+
+  To plate the geometries on Earth we need to know their CRS. The CRS could be a spheroid CRS such as WGS84, a projected 2D cartesian CRS such as UTM or Mercator, or a 3D CRS, or including time.
+  
+
+### How simple features are organized in R
+
+  In `sf`, all functions operating on spatial data are prefixed by `st_`. 
+  
+  Simple features are implemented as R native data. Feature geometries are stored in a `data.frame` column. There are 3 classes to represent sfs: 
+  
+  * `sf`, the dataframe with feature attributes and geometries, containing the other 2 classes;
+  * `sfc` list-column with the geometries for each feature, made of `sfg`;
+  * `sfg` feature geometry of an individual simple feature. 
+  
+  Usually we work with datasets consisting of sets of features with attributes. 
+  
+  Example:
+  
+```{r}
+nc <- st_read(system.file("shape/nc.shp", package="sf"))
+class(nc)
+attr(nc, 'sf_column')
+```
+
+```{r}
+head(nc)
+```
+
+
+```{r}
+plot(nc)
+```
+
+```{r}
+head(nc[9:15], 2)
+```
+
+  Cada fila es una feature simple. En la columna `geometry` del dataframe tenemos la columna `geometry`, que es un objeto `sfc`, que es una columna que en cada fila contiene un vector con objetos `sfg`que son las geometrias simples que forman la fila.
+  
+```{r}
+print(nc[1, ]$geometry)
+```
+
+
+```{r}
+methods(class = 'sf')
+```
+#### Clase `sfc`
+  
+  La columna `geometry` que contiene las geometrias es una lista de la clase `sfc`.
+  
+```{r}
+class(nc$geometry)
+```
+  Leamos la columna:
+```{r}
+st_geometry(nc)
+```
+
+```{r}
+nc$geometry
+```
+
+  Veamos una geometria completa, la de la fila 1:
+
+```{r}
+st_geometry(nc)[[1]]
+```
+
+```{r}
+plot(st_geometry(nc)[[1]])
+```
+
+```{r}
+plot(st_geometry(nc)[[2]])
+```
+  El formato general para un `MULTIPOLYGON` en la columna `geometry` deberia ser MULTIPOLYGON(POL1, POL2, ..., POLN), donde POL_i tendra el formato (EXT1, HOLE1, HOLE2, ...). Las coordenadas se separan con parentesis. Por lo tanto:
+  MULTIPOLYGON((()()())(()()())()...). Como no tengo huecos y solo tengo un solo poligono por fila, resulta en: MULTIPOLYGON((())), refiriendose al anillo exterior, sin huecos, del primer poligono.
+  
+```{r}
+par(mar = c(0,0,1,0))
+plot(nc[1], reset = FALSE) # reset = FALSE: we want to add to a plot with a legend
+plot(nc[40,1], col = 'grey', add = TRUE)
+```
+  Algunos poligonos tienen multiples anillos exteriores. Los identificamos viendo cuales filas tienen longitud > 1 en la columna geometria:
+  
+```{r}
+mult_ext_rings <- sapply(
+  X = st_geometry(nc),
+  FUN = length
+) > 1
+which(mult_ext_rings)
+plot(nc[which(mult_ext_rings), 1], col = 2:7)
+```
+  Observemos la geometria de la feature 4:
+```{r}
+geom_4_total <- st_geometry(nc)[[4]]
+st_bbox(geom_4_total)
+plot(geom_4_total)
+```
+  Observamos que tiene un formato 
+  
+  $$MULTIPOLYGON(((.., .., )), ((..., ...)), ((..., ...)))$$
+  O sea que este poligono contiene 3 poligonos. El primer poligono consiste de un anillo exterior y 0 o mas anillos interiores. 
+  Busquemos los pares de cordenadas del segundo anillo:
+  
+```{r}
+geom_4_total[[2]][[1]]
+```
+
+
+```{r}
+attributes(st_geometry(nc))
+```
+
+#### Clase `sfg`
+
+  *Simple feature geometry*. Consisten en la geometria de una feature simple, como un punto, linea o poligono. En R, un punto unico es un vector numerico; un conjunto de puntos (que forman una linea o un anillo de un poligono) es una matriz donde fila = punto, y cuanlquier otro conjunto es una lista.
+
+```{r}
+#XYZM
+x <- st_point(c(1, 2, 3, 4))
+x
+str(x)
+```
+
+```{r}
+# multipoint
+p <- rbind(
+  c(3.2,4), 
+  c(3,4.6), 
+  c(3.8,4.4), 
+  c(3.5,3.8), 
+  c(3.4,3.6), 
+  c(3.9,4.5)
+)
+p
+mp <- st_multipoint(p)
+mp
+plot(mp)
+```
+
+```{r}
+# linestring
+l <- st_linestring(p)
+l
+plot(l)
+```
+
+```{r}
+# polygon
+p1 <- rbind(c(0,0), c(1,0), c(3,2), c(2,4), c(1,4), c(0,0))
+p1
+p2 <- rbind(c(1,1), c(1,2), c(2,2), c(1,1))
+p2
+pol <- st_polygon(list(p1,p2))
+plot(pol)
+```
+
+```{r}
+# geometry collection
+gc <- st_geometrycollection(list(mp, pol, l))
+plot(gc)
+```
+
+### Reading and writing
+
+```{r}
+filename <- system.file("shape/nc.shp", package="sf")
+nc <- st_read(filename)
+# or: nc <- read_sf(filename)
+plot(nc)
+```
+
+```{r}
+st_write(nc, 'nc.shp')
+```
+
+  Probemos si anda con el .shp que me daba problemas:
+```{r}
+path <- '../data/external/data/capas_sig/'
+ff <- st_read(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'Fuegos_Firms'
+)
+head(ff)
+qtm(ff)
+```
+  To read another format we need to use the drivers. If we don't specigy `driver` and `layer` arguments, `st_read` tries to guess them or just reads the first layer. 
+  
+  `st_layers` lists the layers present in a `dsn`:
+
+```{r}
+st_layers(system.file("osm/overpass.osm", package="sf"))
+```
+
+  Read .kml files:
+
+```{r}
+path1 <- "../data/external/"
+scot <- st_read(
+  dsn = paste(path1, 'scot_district.kml', sep = '')
+)
+plot(scot)
+```
+
+### CRS and transformations
+
+  Todas las geometrias en la columna de geometria de un dataframe `sf` tienen el mismo CRS.
+  
+  La libreria `PROJ` es capaz de entender las cadenas `proj4string` que describen a un CRS. Los `epsg` se refieren a CRS conocidos, cuyos parametros pueden cambiar en el tiempo. Por eso tambien es necesario guardar los `epsg` junto con los `proj4string`. 
+  
+  Podemos hacer transformaciones de CRS usando `st_transform`. Ejemplo: de lat/long en NAD27 a EPSG:3857 (Mercator):
+  
+```{r}
+st_crs(nc)
+```
+
+```{r}
+nc_3857 <- st_transform(
+  x = nc,
+  crs = 3857 # int with epsg code
+)
+st_crs(nc_3857)
+```
+
+```{r}
+st_geometry(nc_3857)[[4]][[2]][[1]]
+```
+
+```{r}
+st_geometry(nc)[[4]][[2]][[1]]
+```
+
+
+### Convertion to/from `sp`
+
+  `sp` objects only support multilinestring and multipolygon, so lines and polygon geometries are automatically coerced into their MULTI form. 
+  
+```{r}
+methods(st_as_sf)
+methods(st_as_sfc)
+```
+ De `sf` a `sp`:
+```{r}
+nc_sp <- as(object = nc, Class = 'Spatial')
+nc_sp
+```
+  De `sp` a `sf`:
+  
+```{r}
+nc2 <- st_as_sf(nc_sp)
+all.equal(nc, nc2)
+```
+
+
+### Operaciones geometricas
+
+  Calcular distancia entre geometrias:
+  
+```{r}
+x <- st_transform(nc, crs = 32119)
+x
+st_distance(x[c(1,4,22),], x[c(1, 33,55,56),])
+```
+  
+  Hay otros comandos que devuelven una matriz con `TRUE` o ceros, o una matriz logica.
+  
+  Por ejemplo, `st_intersects` devuelve para cada elemento de la primera geometria, la lista de elementos de la segunda geometria que se intersecan.
+  
+```{r}
+st_intersects(nc[1:3, ], nc[1:5, ])
+par(mfrow = c(1, 2))
+plot(nc[1:3, 'geometry'])
+plot(nc[1:5, 'geometry'])
+```
+
+```{r}
+st_intersects(nc[1:3, ], nc[1:5, ], sparse = FALSE)
+```
+
+```{r}
+plot(st_buffer(
+  x = st_geometry(nc_3857[c(1), ]), 
+  dist = 10000
+  ), border = 'red')
+plot(st_geometry(nc_3857[c(1), ]), add = TRUE, col = 'gray')
+```
+
+```{r}
+par(mfrow = c(1, 2))
+plot(nc_3857)
+plot(st_union(nc_3857))
+```
+  Las geometrias no simples son por ejemplo lineas que se cortan. Las geometrias no validas son por ejemplo poligonos con lineas que se cortan.
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+v
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+v
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+v
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+v
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+
+
+

@@ -1,0 +1,274 @@
+---
+title: "I/O spatial files"
+author: "Guillermina Senn"
+date: "5/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rgdal)
+library(sp)
+library(sf)
+library(tmap)
+```
+
+```{r}
+path <- '../data/external/data/capas_sig/'
+```
+
+## 1. Vector files
+
+  For small files or in most cases we can use `rgdal::readOGR`. But in some cases (I don't know still why), could be due to NA values or big shapefiles, this command will either take too long, or throw an error. 
+  
+```{r}
+areap <- readOGR(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'area_protegida'
+)
+head(areap@data)
+qtm(areap)
+```
+
+  An alternative to `rgdal::readOGR` is `sf::read_sf`, which is supposed to be quicker and newer.
+
+```{r}
+ff <- st_read(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'Fuegos_Firms'
+)
+head(ff, 2)
+#qtm(ff)
+```
+  
+  To print vector files we can use `rgdal::writeOGR` and `sf::write_sf`:
+  
+```{r}
+writeOGR(
+  obj = lip['ID'],
+  dsn = paste(path, 'scot/scot_district.kml', sep = ''),
+  layer = 'borders',
+  driver = 'KML'
+)
+```
+  
+```{r}
+filename <- system.file("shape/nc.shp", package="sf")
+nc <- read_sf(filename)
+st_write(nc, "nc.shp")
+```
+  
+  To read .kml files:
+  
+```{r}
+routes_sf_1 <- read_sf('data/routes.kml')
+```
+  
+  To write .kml files:
+```{r}
+writeOGR(
+  obj = lip['ID'],
+  dsn = paste(path, 'scot/scot_district.kml', sep = ''),
+  layer = 'borders',
+  driver = 'KML'
+)
+```
+
+  To read .kmz files:
+```{r}
+library(fs)
+input_file <- paste(path, 'climaticas_meteorologicas/estaciones/estaciones_nuestro.kmz', sep = '')
+input_file
+target_file <- paste(path, 'climaticas_meteorologicas/estaciones/.temp.kml.zip', sep = '')
+fs::file_copy(input_file, target_file)
+unzip(target_file)
+new_kml <- paste(path, 'climaticas_meteorologicas/estaciones/doc.kml', sep = '')
+read_sf(new_kml)
+
+#cleanup the temp files
+fs::file_delete(target_file)
+fs::file_delete('doc.kml')
+```
+  GeoPackage files: with `rgdal`.
+  
+  **Writing** a `SpatialPointsDataFrame` to file using `.gpkg` format:
+```{r, echo = FALSE}
+cities <- readOGR(system.file("vectors", 
+                              package = "rgdal")[1],
+                  "cities")
+```
+
+```{r}
+getClass(cities)
+```
+
+```{r}
+outname <- 'cities.gpkg'
+writeOGR(
+  obj = cities,
+  dsn = outname,
+  layer = 'cities',
+  driver = 'GPKG'
+)
+```
+
+  **Reading** a `gpkg`:
+
+  With OGR. Note: I had issues with encoding and even some values were read as `NA`.
+```{r}
+cities <- readOGR(
+  dsn = 'cities.gpkg',
+  layer = 'cities'
+)
+names(cities)
+head(cities)
+getClass(cities)
+```
+
+  With sf. It is much quicker than OGR and I found no issues.
+```{r}
+cities <- st_read(
+  dsn = 'cities.gpkg'
+)
+names(cities)
+head(cities)
+getClass(cities)
+```  
+
+```{r}
+qtm(cities
+    #symbols.size = as.numeric(cities$POPULATION),
+    #symbols.col = 'CAPITAL'
+    )
+```
+
+  **Writing a gpkg**:
+  
+  With OGR:
+  
+```{r}
+writeOGR(
+  obj = data,
+  dsn = '../data/processed/cuenca/cuenca.gpkg',
+  layer = 'cuenca',
+  driver = 'GPKG'
+)
+```
+  
+  With SF:
+  
+```{r}
+st_write(
+  obj = data,
+  dsn = '../data/processed/cuenca/cuenca.gpkg',
+  layer = 'cuenca',
+  driver = 'GPKG',
+  append = FALSE # To overwrite
+)
+```
+  
+## Raster files
+
+  To read .tif files:
+  
+```{r}
+espi_ltt <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/ESPI_LTT_carca_WGS84_2000_2019.tif', sep = '')
+)
+qtm(espi_ltt)
+```
+  
+```{r}
+
+```
+  
+  
+```{r}
+
+```
+  
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  v
+```{r}
+
+```
+  v
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+```{r}
+
+```
+  
+  

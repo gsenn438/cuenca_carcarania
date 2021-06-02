@@ -1,0 +1,522 @@
+---
+title: "20210528_cressie_lattice_cuenca"
+author: "Guillermina Senn"
+date: "5/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, warning=FALSE, echo=FALSE}
+library(INLA)
+library(brinla)
+
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+library(gstat)
+library(spatialreg)
+library(nlme)
+library(spaMM)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(car)
+library(MASS)
+library(ranger)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(GGally)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+
+# Capitulo 6: Modelo espaciales sobre grillas
+
+
+## 1. Cargar y pre-procesar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+# data <- data[data$id_unico < 150, ]
+# data <- data[!is.na(data$Media_VUT), ]
+# data <- data[!is.na(data$Media_DEM), ]
+st_geometry(data) <- data$geom
+```
+```{r}
+centroids <- st_centroid(data)
+coords <- st_coordinates(centroids$geom)
+data$lat <- coords[, 1]
+data$lon <- coords[, 2]
+```
+
+
+
+```{r}
+qtm(data, "Media_ESPI.LTT")
+```
+
+## 2. Exploratory analysis
+
+### 2.1 Spatial EDA
+
+  The semivariogram:
+  
+```{r}
+vgm <- variogram(
+  object = Media_ESPI.LTT ~ 1,
+  data = data
+)
+plot(vgm, pch = 16, cex = 0.6)
+```
+
+  El índice de autocorrelación espacial de Moran:
+  
+```{r}
+nb <- poly2nb(pl = data, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = data$Media_ESPI.LTT, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+# plot(imoran)
+imoran
+```
+```{r}
+lm1 <- lm(
+  formula = Media_ESPI.LTT ~ Media_DEM + Media_VUT,
+  data = data
+)
+data$res_lm1 <- residuals(lm1)
+summary(lm1)
+```
+
+```{r}
+imoran <- moran.mc(x = data$res_lm1, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+imoran
+qtm(shp = data, fill = 'res_lm1')
+```
+
+
+## 3. SAR
+
+  El modelo SAR es una regresion lineal 
+  
+$$Z(s) = X(s)\beta + e(s)$$
+
+donde los errores son los que incorporan la autorregresion espacial, al estar regresionados entre ellos. Su expresion es:
+  
+$$e_i = \sum_{i=1}^m{b_{ij}e_i + \varepsilon_i}$$
+  Otra manera de expresar el modelo, en forma matricial y haciendo explicita la dependencia de los errores, es:
+  
+$$(I-B)(Z-X'\beta) = \varepsilon$$
+  En este modelo:
+  * $Z \sim G(X'\beta, \Sigma_{SAR})$, con 
+  $\Sigma_{SAR} = Var(Z) = (I-B)^{-1}\Sigma_{\varepsilon}(I-B')^{-1}$.
+  
+  * los $\varepsilon_i$ son los errores residuales que se asumen i.i.d. y 
+  $N(0, \sigma^2_{\varepsilon_i}I)$. Se pueden modelar homo u heterocedasticamente. 
+  
+  * los $b_{ij}$ son los componentes de la matriz de dependencia espacial entre areas, y los $b_{ii}=0$ para que las areas no se regresionen sobre si mismas. Es muy comun que $B = \lambda W$,
+  donde $\lambda$ es el parametro de autocorrelacion espacial, y $W$ la matriz de dependencia espacial. 
+  
+  * La matriz $(I-B)$ debe ser no singular. 
+
+  Los modelos SAR se estiman eficientemente con ML con la funcion `spdep::spautolm`, donde la matriz $W$ es un objeto de pesos `listw`. Este comando utiliza ML y no sirve para grandes datasets con miles de observaciones porque usa metodos de matrices densas. 
+
+  Ajustamos un SAR usando como matriz de vecindad la `w` que calcule antes, con estilo W (normalizado por fila) y definiendo como vecinos con modo reina.
+
+```{r}
+# print(w, zero.policy = TRUE)
+sar1 <- spautolm(
+  formula = Media_ESPI.LTT ~ Media_DEM + Media_VUT,
+  data = data,
+  listw = w,
+  family = "SAR",
+  verbose = TRUE
+)
+data$res_sar1 <- residuals(sar1)
+summary(sar1)
+```
+  
+  El test de cociente de verosimilitudes, denominado *LR test* en la salida anterior, se compara el modelo sin autocorrelacion espacial (i.e. $\lambda = 0$) con el modelo con autocorrelacion (i.e. $\lambda \ne 0$). En este caso vemos que el p-value es significativo y por lo tanto $\lambda = 0.04 > 0$, es decir, se encuentra autocorrelacion espacial significativa.
+  
+  Por otro lado, comparando con la regresión lineal estándar, el intercepto se achicó, el coeficiente de VUT ya no es significativo, y el DEM es mayor en magnitud.
+
+```{r}
+imoran <- moran.mc(x = data$res_sar1, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+imoran
+qtm(shp = data, fill = 'res_sar1')
+```
+  El modelo SAR ha logrado usar la información de la autocorrelación espacial de manera que ya no quede en los residuos.
+  
+
+## 4. CAR
+
+  En este caso el modelo se especifica sobre la distribucion *condicional* de los términos de error. Sean $e_{j \sim i}$ los términos de error correspondientes a los vecinos del area $i$. Luego:
+  
+$$e_i | e_{j \sim i} \sim N(\sum_{j \sim i}{\frac{c_{ij}e_j}{\sum_{j\sim i}{c_{ij}}}}, \frac{\sigma^2_{e_i}}{\sum_{j\sim i}{c_{ij}}})$$
+
+  O sea, los errores condicionales se distribuyen normales, con varianza dada por la varianza en el area normalizada por la suma de los pesos vecinos, y media dada por la media ponderada de los pesos vecinos, normalizada por la suma de los pesos vecinos. Los $c_{ij}$ son similares a los $b_{ij}$. 
+  
+  Ajustemos un modelo CAR.
+  
+```{r}
+car1 <- spautolm(
+  formula = Media_ESPI.LTT ~ Media_DEM + Media_VUT,
+  data = data,
+  listw = w,
+  family = "CAR",
+  verbose = TRUE
+)
+data$res_car1 <- residuals(car1)
+summary(car1)
+```
+
+```{r}
+imoran <- moran.mc(x = data$res_car1, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+imoran
+qtm(shp = data, fill = 'res_car1')
+```
+
+  Según Bivand, podría usar el AIC para comparar los modelos. Vemos que el SAR1 es mejor.
+  
+```{r}
+print(paste('LM 1:', AIC(lm1)))
+print(paste('SAR 1:', AIC(sar1)))
+print(paste('CAR 1:', AIC(car1)))
+```
+
+  El modelo **proper CAR** es el más común y sus efectos espaciales se pueden especificar como:
+  
+$$\omega(s) \sim MVN(0, \alpha^2[D - \rho W]^{-1})$$
+
+  dodne $\alpha^2$ es la varianza espacial. Este modelo implica que la distribución condicional del efecto espacial en cada sitio $i$ dada su vecindad es un promedio de los efectos espaciales de sus vecinos, pesados por un parámetro de suavización, $\rho$. Ademas, condicionalmente, la distribución para cada vecino es independiente. 
+  
+$$\omega(s_i) | \omega(s_j), i \ne j\sim N(\rho \frac{\sum_j{\omega(s_j)}}{N_i}, \frac{\alpha^2}{N_i})$$
+
+  Cuando una región tiene pocos vecinos, el $N_i$ sera pequeño, permitiendo que la distribución normal tenga mayor varianza. Cuando tengo muchos vecinos, la incertidumbre disminuye.
+  
+  Cuando el parametro $\rho$ es cerca de cero, hablo de observaciones independientes, o sea, no hay correlación. 
+  
+  En la librería frecuentista `spaMM` no tengo el modelo anterior, si no:
+  
+$$\omega(s) \sim MVN(0, \alpha^2[I_N - \rho W]^{-1})$$
+
+  En el ajuste del modelo con la libreria `spaMM` por ejemplo, $N_i = 0$ en la formula anterior. Entonces la media condicional en cada sitio $i$ es la suma de efectos espaciales de sus vecinos, ponderados por el parametro $\rho$, pero ahora la interpretación de $\rho$ no es tan intuitiva, si no que se trata de otro tipo de parámetro de suavizado espacial. Además, la variabilidad no depende del número de vecinos. 
+
+  El nuevo $\rho$ debe quedar en el intervalo $(1/\lambda_1, 1/\lambda_N)$, donde los $\lambda$ son los eigenvalores mas pequeños y mas grandes de W. Esto es así porque la matriz de varianzas-covarianzas debe ser positiva definida.
+  
+  Veamos la forma de la matriz de correlación entre regiones cuando cambiamos el $\rho$.
+
+```{r}
+nb <- poly2nb(pl = data, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'C', zero.policy = TRUE)
+n <- length(w$weights)
+library(Matrix)
+w_mat <- as(w, "CsparseMatrix")
+```
+
+```{r}
+alpha2 <- 2
+rho <- -0.5
+CAR_sigma <- alpha2 * solve(diag(n) - rho * w_mat)
+test <- round(as.matrix(CAR_sigma), 4)
+all(test == t(test))
+image(cov2cor(CAR_sigma), useRaster = TRUE)
+```
+
+  Veamos los efectos espaciales que genera cada matriz de correlación:
+  
+```{r}
+library(mvtnorm)
+fake <- rmvnorm(
+  n = 1,
+  mean = rep(0, n),
+  sigma = as.matrix(CAR_sigma),
+  method = "chol"
+)
+data$fake <- c(fake)
+moran.test(data$fake, w)
+qtm(data, fill = 'fake')
+```
+
+  Un modelo proper CAR:
+$$ESPI \sim N(\alpha + x_i^'(s)\beta + \omega(s), \tau^2I$$
+
+$$\omega(s) \sim MVN(0, \alpha^2[I -  \rho W] ^{-1})$$
+
+  Veamos que la varianza del error $\tau^2$ implica homocedasticidad e independencia de los residuos, y a la correlación la pongo en los efectos espaciales $\omega(s)$.
+  
+```{r, warning=FALSE}
+# este paso es importante, que los datos esten ordenados
+data <- data[order(data$id_unico), ]
+w_mat <- st_touches(data, sparse = FALSE)
+isSymmetric(w_mat)
+dim(w_mat)
+image(w_mat)
+```
+
+```{r}
+car2 <- fitme(
+  formula = Media_ESPI.LTT ~ Media_DEM + Media_VUT + adjacency(1 | id_unico),
+  adjMatrix = w_mat,
+  method = 'ML',
+  data = data,
+  family = gaussian()
+)
+data$res_car2 <- residuals(car2)
+summary(car2)
+```
+  Para entender si el $\rho$ es grande o no (si el grado de dep espacial es grande o no) puedo comparar su magnitud con los limites del intervalo dado por los eigenvalores de la W.
+  
+```{r}
+moran.test(data$res_car2, w)
+qtm(data, fill = 'res_car2')
+```
+
+```{r}
+car::qqPlot(data$res_car2)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+  
+  
+  
+  
+  
+  
+  
+  
+## 5. Modelo mixto con efectos aleatorios
+
+  Los errores $e_i$ son los que incorporan la variabilidad entre areas. Estos terminos se conocen a veces como *efectos aleatorios - RE*, porque su valor puede cambiar de area a area, lo que no se espera que suceda con las covariables (que entran en los *efectos fijos - FE*). Es comun usar los RE para modelar interaccion entre observaciones. 
+  
+  Los modelos mixtos se pueden formular como:
+  
+$$Y = X\beta + Ze + \varepsilon$$
+
+  donde:
+ 
+ * $e$ es el vector de RE y $Z$ les da su estructura. Se asume $e \sim N(0, \Sigma_e)$. $Z$ es una matriz de diseño fija o parametrizada. 
+ 
+  Para ajustar los modelos se usa ML o REML. En R usamos los paquetes `nlme` y `lme4`, que nos permiten especificar distintos tipos de matrices de covarianza para los efectos aleatorios. 
+  
+ La parte fija del modelo es la misma formula que venimos usando para los modelos anteriores LM, SAR y CAR. La parte aleatorio debe incluir un efecto aleatorio **por area**. Esto se hace incluyendo una columna que identifique al area en la formula para los RE:
+ 
+  Primero ajustamos un mixto sin estructura de correlación. Los coeficientes son similares, ambas DEM y VUT parecen significativas.
+  
+```{r}
+# df$id_unico <- as.factor(df$id_unico)
+# mix1 <- lme(
+#   fixed = Media_ESPI.LTT ~ Media_DEM + Media_VUT,
+#   random = ~ 1 | id_unico,
+#   data = df,
+#   # correlation = cor_str,
+#   method = 'REML'
+# )
+# data$res_mix1 <- residuals(mix1)
+# summary(mix1)
+```
+
+```{r}
+# imoran <- moran.mc(x = data$res_mix1, listw = w, nsim = 1000, 
+#                    zero.policy = T, na.action = na.omit)
+# imoran
+# qtm(shp = data, fill = 'res_mix1')
+```
+  
+  Ahora ajustemos un modelo mixto usando una matriz de correlación que depende de la distancia entre los centroides de las areas. Primero necesitamos especificar la estructura de correlacion entre areas; en este caso lo hacemos con un semivariograma Gaussiano basado en las distancias euclideas ente centroides.
+  
+  La funcion `nlme::corSpatial` crea un objeto que contiene una estructura de correlacion espacial. El argumento `type` le dice que tipo de semivariograma tiene que armar. Una vez que el objeto esta construido, para usarlo hay que inicializarlo con `Initialize`. 
+
+  En mi caso creo que no puedo ajustar porque tengo solo una observación para cada nivel del efecto aleatorio. [http://r-sig-geo.2731867.n2.nabble.com/testing-nlme-models-for-spatial-correlation-td7591354.html]
+  
+  "Dear Javier,
+
+It looks like you have only one observation for each combination of BLOQUE/
+AMBIENTE/ TRATAMIENTO/ SUBMUESTREO. That is an observation level random
+effect (OLRE) which doesn't make sense with a Gaussian distribution. The
+ORLE and the residual would model the exact same thing. Model2 doesn't make
+sense."
+  
+```{r}
+# structure <- corSpatial(
+#   value = 1, # range
+#   form = ~ lat + lon, # no termino de entender esto
+#   type = 'gaussian'
+# )
+# 
+# df <- data.frame(data)
+# cor_str <- Initialize(
+#   object = structure,
+#   data = df[, c('lat', 'lon')],
+#   nugget = TRUE
+# )
+# 
+# cor_str
+# plot(cor_str)
+```
+
+```{r}
+# mix2 <- lme(
+#   fixed = Media_ESPI.LTT ~ Media_DEM + Media_VUT,
+#   random = ~ 1 | id_unico,
+#   data = df,
+#   correlation = corGaus(value = c(0.1), form = ~ lat + lon, nugget = TRUE),
+#   method = 'REML'
+# )
+# data$res_mix2 <- residuals(mix2)
+# summary(mix2)
+```
+
+```{r}
+# imoran <- moran.mc(x = data$res_mix2, listw = w, nsim = 1000, 
+#                    zero.policy = T, na.action = na.omit)
+# imoran
+# qtm(shp = data, fill = 'res_mix2')
+```  
+
+## 7
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+

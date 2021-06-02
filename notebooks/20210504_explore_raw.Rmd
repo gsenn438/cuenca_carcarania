@@ -1,0 +1,484 @@
+---
+title: "Explorando los datos crudos"
+author: "Guillermina Senn"
+date: "5/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rgdal)
+library(tmap)
+```
+
+```{r}
+path <- '../data/external/data/capas_sig/'
+```
+
+## 1. Coberturas
+
+### 1.1 Sueltas
+
+```{r}
+n1 <- readGDAL(
+  fname = paste(path, 'coberturas/Nivel1_28_dic_2018_30m.tif', sep = '')
+)
+qtm(n1)
+```
+  
+```{r}
+n2 <- readGDAL(
+  fname = paste(path, 'coberturas/Nivel2_28_dic_2018_30m.tif', sep = '')
+)
+qtm(n2)
+```
+  Mapa 2.5: 
+  
+* 0,255,255,255,255,0
+* 1,0,152,0,255,Monte
+* 2,101,217,43,255,Arbustales y matorrales
+* 3,201,78,208,255,Pastizal natural
+* 4,251,144,225,255,Pastizal natural con rocas o suelo desnudo
+* ...
+* 13,255,171,152,255,Zona urbana sin consolidar
+* 14,0,0,0,255,Infraestructura vial
+* 15,241,241,166,255,Actividades invernales
+* ...
+* 22,132,55,29,255,Plantaciones forestales maderables
+* 23,168,88,61,255,Plantaciones perennes (frutales) de secano
+* 24,176,122,103,255,Plantaciones perennes (frutales) irrigadas
+
+```{r}
+n25 <- readGDAL(
+  fname = paste(path, 'coberturas/Nivel25_28_dic_2018_30m.tif', sep = '')
+)
+qtm(n25)
+```
+
+  Coberturas mapa 3: se abren las coberturas 15-18 de 2.5 (actividades invernales/estivales/anuales/sin actividad):
+
+* 15,228,202,0,255,Trigo
+* 16,233,127,2,255,Maíz
+* 17,168,174,0,255,Soja
+* 18,189,90,80,255,Maní
+* 19,118,39,79,255,Sorgo
+* 20,205,205,115,255,Trigo-Maíz de segunda
+* 21,136,140,60,255,Trigo-Soja de segunda
+
+
+```{r}
+n3 <- readGDAL(
+  fname = paste(path, 'coberturas/Nivel3_28_dic_2018_30m.tif', sep = '')
+)
+qtm(n3)
+```
+
+### 1.2 vegetacion
+
+```{r}
+areap <- readOGR(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'area_protegida'
+)
+head(areap@data)
+qtm(areap)
+```
+
+```{r}
+cc <- readOGR(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'CuencaCarcarania'
+)
+head(cc@data)
+qtm(cc)
+```
+
+```{r}
+espi_ltt <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/ESPI_LTT_carca_WGS84_2000_2019.tif', sep = '')
+)
+qtm(espi_ltt)
+```
+
+```{r}
+espi_mean <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/ESPI_mean_carca_WGS84_2000_2019_i.tif', sep = '')
+)
+qtm(espi_mean)
+```
+
+```{r}
+ff <- st_read(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'Fuegos_Firms'
+)
+#head(ff@data)
+#qtm(ff)
+```
+
+```{r}
+lpd <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/LPD_carcarania.tif', sep = '')
+)
+qtm(lpd)
+```
+
+```{r}
+ndvi_ltt <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/NDVI_LTT_carca_WGS84_2000_2019.tif', sep = '')
+)
+qtm(ndvi_ltt)
+```
+
+```{r}
+ndvi_mean <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/NDVI_mean_carca_WGS84_2000_2019_i.tif', sep = '')
+)
+qtm(ndvi_mean)
+```
+
+```{r}
+study <- st_read(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'StudyAreaCarcarania'
+)
+head(study)
+plot(study)
+```
+
+```{r}
+study2 <- readOGR(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'StudyAreaCarcarania'
+)
+head(study2)
+plot(study2)
+```
+```{r}
+wdpa <- st_read(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'WDPA_area_protegida'
+)
+names(wdpa)
+plot(wdpa, max.plot = 5)
+```
+
+## 2. Climaticas_meteorologicas
+
+  Esto es un KML con las ubicaciones de las estaciones y luego las series temporales de las mediciones en cada estacion, generalmente entre 2015 y 2020.
+   No se como las habran integrado al analisis.
+   
+## 3. Edaficas_geologicas
+
+
+
+```{r}
+cartas <- st_read(
+  dsn = paste(path, 'edaficas_geologicas/Cartas_suelo', sep = ''),
+  layer = 'cartas_suelo'
+)
+names(cartas)
+```
+
+```{r}
+plot(cartas['ip'])
+```
+```{r}
+limit <- st_read(
+  dsn = paste(path, 'edaficas_geologicas/Limitantes_edaficas', sep = ''),
+  layer = 'limitantes_edaficasPolygon'
+)
+names(limit)
+plot(limit)
+```
+
+```{r}
+mo <- readGDAL(
+  fname = paste(path, 'edaficas_geologicas/MO/MO_pred.tif', sep = ''),
+)
+names(mo)
+qtm(mo)
+```
+  En variables interpoladas tengo muchos tifs con el contenido de elementos y de capas del suelo...
+  
+```{r}
+for (var in c('ARCILLA', 'ARENA', 'CC', 'CE', 'CO',
+              'Cu', 'Fe', 'K', 'Limo', 'Mg', 'Mn', 
+              'Nt','P', 'pH', 'Zn')){
+  obj <- readGDAL(
+    fname = paste(path,
+                  'edaficas_geologicas/variables_interpol/',
+                  var,
+                  '.tif',
+                  sep = ''),
+  )
+  print(qtm(obj))
+}
+
+```
+
+```{r}
+obj <- readGDAL(
+    fname = paste(path,
+                  'edaficas_geologicas/',
+                  'grid',
+                  '.tif',
+                  sep = ''),
+  )
+qtm(obj)
+```
+
+```{r}
+suelos <- st_read(
+  dsn = paste(path,
+              'edaficas_geologicas/suelos_geointa.kml', 
+              sep = '')
+)
+names(suelos)
+head(suelos)
+```
+
+## Hidrologicas
+
+
+```{r}
+# rec1 <- readGDAL(
+#   fname = paste(path,
+#                 'hidrologicas/Recurrencia19842018.tif',
+#                 sep = '')
+# )
+```
+## Limites
+
+```{r}
+limit <- st_read(
+  dsn = paste(path,
+              'Limites', 
+              sep = ''),
+  layer = 'StudyAreaCarcarania'
+)
+names(limit)
+plot(limit)
+```
+## Otras
+
+
+```{r}
+p <- paste(path, 'otras/RedVial/red_nacional.gpkg/', sep = '')
+ogrListLayers('test.gpkg')
+```
+
+```{r}
+nac <- readOGR(
+  dsn = paste(path,
+              'otras/RedVial/Red primaria.gpkg',
+              sep = ''),
+  layer = 'Red primaria'
+)
+qtm(nac)
+```
+
+
+```{r}
+valor <- st_read(
+  dsn = paste(path, 
+              'otras/valor_tierra_rural_2019',
+              sep = ''),
+  layer = 'valor_tierra_rural_2019Polygon'
+)
+names(valor)
+qtm(valor)
+```
+
+```{r}
+vut <- readGDAL(
+  fname = paste(path, 
+              'otras/valor_tierra_rural_2019/VUT.tiff',
+              sep = '')
+)
+names(vut)
+qtm(vut)
+```
+
+
+```{r}
+snic <- st_read(
+  dsn = paste(path,
+              'segmentacion',
+              sep = ''),
+  layer = 'SNIC'
+)
+qtm(snic)
+names(snic)
+```
+
+```{r}
+snic <- st_read(
+  dsn = paste(path,
+              'segmentacion',
+              sep = ''),
+  layer = 'SNIC_c_1-9_s_7'
+)
+qtm(snic)
+names(snic)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

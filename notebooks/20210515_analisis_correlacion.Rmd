@@ -1,0 +1,378 @@
+---
+title: "20210515_analisis_correlacion"
+author: "Guillermina Senn"
+date: "15/5/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+  Este script es para explorar los datos (respuestas y covariables) a escala de las unidades homogeneas. 
+  1. Replicar lo que hace Mariano Cordoba en clase.
+  2. Ejercitar distintas librerias de graficos.
+
+## 0. Librerias y funciones
+
+```{r, warning=FALSE, echo=FALSE}
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(ggcorrplot)
+library(car)
+library(caret)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(RColorBrewer) 
+library(factoextra)
+```
+
+## 1. Cargar y pre-procesar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+```
+
+```{r}
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+data
+```
+
+## 2. Analisis de correlacion
+
+### 2.1 Datasets Mariano
+
+  El tCOSha (suelo) no parece ser combinacion lineal de nada. Puede si que este muy correlacionado con MO.
+```{r, cache=TRUE}
+cos_mariano <- st_read(
+  dsn = '../data/raw/productIntermedio/areaEstudio_cos_mariano_descr.gpkg'
+)
+names(cos_mariano)
+```
+  El COS_veg esta en el mismo dataset donde estan las coberturas de suelo. Por lo que parece una combinacion lineal de ellas. 
+  
+```{r, cache=TRUE}
+cos_veg <- st_read(
+  dsn = '../data/raw/productIntermedio/CO_veg.gpkg'
+)
+names(cos_veg)
+```
+  Verifiquemos que `CO_veg` es una combinacion lineal de las coberturas de suelo 25:
+```{r}
+m <- data.frame(cos_veg[, 16:40])
+# estas variables son 0
+ceros <- (names(m) %in% c('geom', "Salina_Porc",
+                            "Plantaciones.perennes..frutales..de.secano_Porc",
+                            "Plantaciones.perennes..frutales..irrigadas_Porc"))
+
+
+m <- m[, names(m)[!ceros]]
+lin <- findLinearCombos(m)
+```
+
+  Me agarra las que son 0. 
+```{r}
+names(m)[lin$remove]
+colin <- lin$linearCombos[[1]]
+names(m)[colin]
+```
+
+  Ahora investiguemos las correlaciones:
+```{r}
+cor1 <- cor(m)
+
+print_high <- function(x){
+  indice_high <- abs(x) > 0.8 & abs(x) != 1
+  # indice_high <- x > 0.7 & x < 0.85
+  print(paste(row.names(corr)[indice_high],
+              x[indice_high]))
+}
+
+for (col in names(m)){
+  print(col)
+  print_high(cor1[, col])
+  print('---------------------------------------------')
+}
+```
+
+```{r}
+ggcorrplot(cor1)
+```
+  **Conclusion:** Creo que Mariano ha calculado la correlacion a partir de las coberturas de suelo, y por lo tanto cuando vaya a regresionar el CO_veg sobre otras, no debo incluir ningun tipo de cobertura de suelo. Por otro lado, para las otras variables respuesta, o bien quito al CO_veg, o bien quito todas las coberturas de suelo. 
+
+
+### 2.2 Matriz de correlacion
+
+  Ahora voy a mirar una matriz de correlacion para detectar los grupos de variables altamente correlacionadas. Solo voy a incluir la Media como estadistico resumen y no voy a incluir las variables que son 0 ni las respuestas.
+  
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+```
+
+  Armo listas con los estadisticos que no me sirven, y los ceros.
+  
+```{r}
+ceros <- c("Salina_Porc", 
+           "Plantaciones.perennes..frutales..de.secano_Porc",
+           "Plantaciones.perennes..frutales..irrigadas_Porc")
+cols_mediana <- names(data)[grepl('Mediana_', names(data))]
+cols_min <- names(data)[grepl('Minimo_', names(data))]
+cols_max <- names(data)[grepl('Maximo_', names(data))]
+cols_cv <- names(data)[grepl('CV_', names(data))]
+```
+
+  Armo lista con las variables respuesta y con las variables iniciales q son de la geometria:
+```{r}
+respuesta <- c('Media_ESPI.LTT', 'Media_ESPI.Mean', 'Media_LPD',
+               'Media_tCOSha', 'CO_veg')
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label", 'id_unico', 'geom')
+```
+
+  Creo un nuevo df solo con las variables que restan:
+  
+```{r}
+cols_delete <- c(ceros, cols_min, cols_mediana, cols_max, cols_cv, respuesta,
+                 others)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1 <- data[, cols_remain]
+ncol(data1)
+```
+
+```{r}
+cplot1 <- ggcorrplot(cor(data1, use = 'complete.obs'), 
+           lab_size = 1, lab = TRUE, 
+           insig = "blank",
+           tl.cex = 4,
+           hc.order = TRUE)
+ggsave('test.png')
+```
+**Conclusion**: Tenemos dos grupos de variables muy altamente correlacionadas:
+
+1. Cuerpos de agua y Recurrencia: 0.89
+2. Las del suelo: ARENA, CO, CEextsat, Nt, CIC, CC, ARCILLA, LIMO y Mn: todas por encima de 0.85 y casi todas excepto Mn con mas de 0.9. 
+
+```{r}
+corr_suelo <- c('Media_ARENA', 'Media_CO', 'Media_CEextsat', 'Media_Nt', 
+                'Media_CIC', 'Media_CC', 'Media_ARCILLA', 'Media_LIMO', 
+                'Media_Mn')
+```
+
+### 2.3 PCA
+
+```{r}
+pca_suelo <- prcomp(data1[complete.cases(data1), corr_suelo], scale = TRUE)
+```
+
+```{r}
+pca_suelo$rotation[, 1]
+```
+
+```{r}
+fviz_eig(pca_suelo)
+```
+
+```{r}
+fviz_pca_ind(pca_suelo,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+```
+
+```{r}
+fviz_pca_var(pca_suelo,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+```
+
+  Guardar las PC1 y PC2:
+```{r}
+res_pca_suelo <- predict(pca_suelo, newdata = data1)
+data1$pca1_suelo <- res_pca_suelo[, 1]
+data1$pca2_suelo <- res_pca_suelo[, 2]
+```
+
+
+
+```{r}
+res_pca_suelo[6, ]
+```
+
+```{r}
+pca_suelo$x
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

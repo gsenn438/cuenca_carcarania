@@ -1,0 +1,288 @@
+---
+title: "20210516_mlm"
+author: "Guillermina Senn"
+date: "5/16/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, warning=FALSE, echo=FALSE}
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+library(gstat)
+
+library(PerformanceAnalytics)
+library(lmtest)
+library(corrplot)
+library(car)
+library(ranger)
+library(nlme)
+
+library(stringr)
+library(dplyr)
+library(tidyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+## 1. Cargar y pre-procesar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+```
+
+
+```{r}
+ndvi <- names(data)[grepl('NDVI', names(data))]
+cols_mediana <- names(data)[grepl('Mediana_', names(data))]
+cols_min <- names(data)[grepl('Minimo_', names(data))]
+cols_max <- names(data)[grepl('Maximo_', names(data))]
+cols_cv <- names(data)[grepl('CV_', names(data))]
+cero <- c('Salina_Porc', 'Plantaciones.perennes..frutales..de.secano_Porc',
+          'Plantaciones.perennes..frutales..irrigadas_Porc')
+aliased <- c('Plantaciones.forestales.maderables_Porc', 'CO_veg')
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label")
+respuestas <- c("Media_ESPI.Mean", 'Media_tCOSha', 'CO_veg')
+lpd <- names(data)[grepl('LPD', names(data))]
+```
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.5 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+data1.5 <- data1.5[complete.cases(data1.5$Media_ARCILLA), ]
+st_geometry(data1.5) <- st_geometry(data1.5$geom)
+```
+
+## 2. Variograma
+
+```{r}
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+```
+
+```{r}
+formula = Media_ESPI.LTT ~ 1
+vgm.1 = variogram(
+  object = formula,
+  data = data1.5
+)
+plot(vgm.1)
+```
+
+```{r}
+vgm_exp = vgm(
+  psill = 1,
+  model = 'Exp',
+  range = 800,
+  nugget = 1
+)
+
+fit_exp <- fit.variogram(
+  object = vgm.1,
+  model = vgm_exp
+)
+
+plot(vgm.1, fit_exp)
+```
+
+```{r}
+vgm_sph = vgm(
+  psill = 1,
+  model = 'Sph',
+  range = 800,
+  nugget = 1
+)
+
+fit_sph <- fit.variogram(
+  object = vgm.1,
+  model = vgm_sph
+)
+
+plot(vgm.1, fit_sph)
+```
+
+  Veamos si queda informacion espacial en los residuos del Modelo 5.
+  Ajusto un modelo lineal sin interacciones.
+  
+```{r}
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+```
+
+```{r}
+lm1.5 <- lm(
+  formula = formula1,
+  data = data1.5,
+  na.action = na.exclude
+)
+data1.5$res <- residuals(lm1.5)
+```
+  
+```{r}
+formula = res ~ 1
+vgm.res = variogram(
+  object = formula,
+  data = data1.5[complete.cases(data1.5$res), ]
+)
+plot(vgm.res)
+```
+
+```{r}
+vgm_exp = vgm(
+  psill = 1,
+  model = 'Exp',
+  range = 800,
+  nugget = 1
+)
+
+fit_exp <- fit.variogram(
+  object = vgm.res,
+  model = vgm_exp
+)
+
+plot(vgm.res, fit_exp)
+```
+
+## 3. Modelos
+
+### 3.1 Modelo 5: LM, original, poly
+
+```{r}
+formula1.5 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+```
+
+```{r}
+lm1.5 <- gls(
+  model = formula1.5,
+  data = data1.5,
+  na.action = na.exclude
+)
+sum1.5 <- summary(lm1.5)
+sum1.5
+```
+
+
+### 3.2 Modelo 8: LM poly, RE id
+```{r}
+mlm1.8 <- lme(
+  fixed = formula1.5, 
+  data = data1.5, 
+  random = ~ 1 | id_unico, 
+  method = "ML",
+  na.action = na.exclude
+)
+sum1.8 <- summary(mlm1.8)
+sum1.8
+```
+```{r}
+data1.5$res_1.8 <- residuals(mlm1.8)
+formula = res_1.8 ~ 1
+vgm.res1.8 = variogram(
+  object = formula,
+  data = data1.5[complete.cases(data1.5$res_1.8), ]
+)
+plot(vgm.res1.8)
+```
+
+
+### 3.3 Modelo 9: LM poly, RE id, Correlacion exponencial
+
+```{r}
+centroids <- st_centroid(data1.5)
+coords <- st_coordinates(centroids$geom)
+data1.5$x <- coords[, 1]
+data1.5$y <- coords[, 2]
+
+mlm1.9 <- lme(
+  fixed = formula1.5,
+  data = data1.5,
+  random = ~ 1 | id_unico,
+  method = "ML",
+  correlation = corExp(form = ~x + y, nugget = TRUE),
+  na.action = na.exclude
+)
+
+sum1.9 <- summary(mlm1.9)
+sum1.9
+```

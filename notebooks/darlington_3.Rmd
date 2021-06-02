@@ -1,0 +1,185 @@
+---
+title: "Untitled"
+author: "Guillermina Senn"
+date: "5/13/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 0. Librerias y funciones
+
+```{r, warning=FALSE, echo=FALSE}
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(ggcorrplot)
+library(car)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(RColorBrewer) 
+```
+
+## 1. Carga datos
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+datat <- data.frame(data_raw)
+```
+
+```{r}
+for (col in names(datat)[names(datat) != 'geom']){
+  datat[, col] <- replace(datat[, col], 
+                         (datat[, col] == Inf) + (datat[, col] == -Inf) > 0, 
+                         NA)
+}
+
+datat
+```
+
+### 3.3 Medidas de asociacion parcial
+
+ Primero corremos una regresion comun, es decir, una regresion simultanea de la respuesta (ESPI) vs dos covariables (ARCILLA y K). El objetivo es obtener los coeficientes de la regresion para luego comparar.
+  
+```{r}
+f1 <-  Media_ESPI.LTT ~ Media_ARCILLA + Media_K
+lmt <- lm(formula = f1, data = datat, na.action = na.exclude)
+summary(lmt)
+```
+  
+  A continuacion corremos una regresion cruzada para obtener la porcion de ARCILLA que es independiente de K. Esta porcion se obtiene restando ARCILLA - Residuos de la regresion cruzada, porque sabemos que los residuos de la regresion OLS son siempre ortogonales a las covariables.
+  
+```{r}
+f2 <-  Media_ARCILLA ~ Media_K
+lmt2 <- lm(formula = f2, data = datat, na.action = na.exclude)
+summary(lmt2)
+datat$res2 <- residuals(lmt2)
+```
+
+  Si calculamos la correlacion entre los residuos 2 y el K (la covariable), vemos que es 0. 
+```{r}
+# cor(x = datat$Media_ARCILLA, y = datat$Media_K, use = 'complete.obs')
+# cor(x = datat$Media_ARCILLA, y = datat$res2, use = 'complete.obs')
+cor(x = datat$Media_K, y = datat$res2, use = 'complete.obs')
+```
+
+  Finalmente hacemos una regresion de la respuesta con la ARCILLA.K, es decir, la porcion de la ARCILLA independiente de K. Observamos que el coeficiente de la regresion para ARCILLA.K es el mismo que el coeficiente para ARCILLA en la regresion simultanea.
+  
+```{r}
+f3 <- Media_ESPI.LTT ~ res2
+lmt3 <- lm(formula = f3, data = datat, na.action = na.exclude)
+summary(lmt3)
+```
+  
+  A la correlacion entre la respuesta (ESPI) y la porcion independiente de la ARCILLA se la llama **correlacion semiparcial**, $sr_{arcilla}$.
+  
+```{r}
+cor(x = datat$Media_ESPI.LTT, y = datat$res2, use = 'complete.obs')
+# cor(x = datat$Media_ESPI.LTT, y = datat$Media_ARCILLA, use = 'complete.obs')
+```
+
+  Ahora hagamos otra cosa. Quitemos de la respuesta la porcion explicada por K, y quitemos de la ARCILLA la porcion explicada por K. 
+
+```{r}
+f4 <- Media_ESPI.LTT ~ Media_K
+lmt4 <- lm(formula = f4, data = datat, na.action = na.exclude)
+summary(lmt4)
+datat$ESPI.K <- residuals(lmt4)
+
+# agreguemos una columna con los residuos ARCILLA.K, que eran los 'res'
+datat$ARCILLA.K <- residuals(lmt2)
+```
+ 
+  Ahora si ahora calculamos la correlacion entre la respuesta independiente de K, y la covariable independiente de K, obtenemos la **correlacion parcial** entre ESPI y la ARCILLA, controlando por K.
+  
+```{r}
+r_EA.K <- cor(x = datat$ESPI.K, y = datat$ARCILLA.K, use = 'complete.obs')
+r_EA.K
+```
+  Si elevamos esta correlacion al cuadrado, obtenemos la porcion de la varianza de ESPI que explica la ARCILLA, que no puede explicar K.
+  
+```{r}
+r_EA.K^2 
+```
+#### 3.4 Algunas relaciones entre estadisticos
+
+  La correlacion semiparcial al cuadrado es la diferencia en el $R^2$ al agregar o quitar la covariable $X_j$. Entonces hagamos la prueba agregando y quitando la ARCILLA. 
+  
+ A la correlacion entre la respuesta (ESPI) y la porcion independiente de la ARCILLA se la llama **correlacion semiparcial**, $sr_{arcilla}$.
+  
+```{r}
+sr_arcilla <- cor(x = datat$Media_ESPI.LTT, y = datat$res2, use = 'complete.obs')
+sr_arcilla^2
+```
+  Ahora miremos los $R^2$ de las regresiones con y sin la arcilla:
+```{r}
+# R de la regresion con ARCILLA y K
+result <- summary(lmt)
+R2_con <- result$r.squared
+R2_con
+
+# R de la regresion sin ARCILLA
+f6 <- Media_ESPI.LTT ~ Media_K
+lmt6 <- lm(formula = f6, data = datat, na.action = na.exclude)
+result6 <- summary(lmt6)
+R2_sin <- result6$r.squared
+R2_sin
+
+# Resta de comprobacion
+round(R2_con - R2_sin, 5) == round(sr_arcilla^2, 5)
+```
+
+
+  Finalmente calculemos los coeficientes de la regresion a mano. Me da una diferencia.. no se por que!
+```{r}
+n <- sum(!is.na(datat$Media_ESPI.LTT))
+s_espi <- sd(datat$Media_ESPI.LTT, na.rm = TRUE)*sqrt(n-1)/sqrt(n)
+n <- sum(!is.na(datat$Media_ARCILLA))
+s_arcilla <- sd(datat$Media_ARCILLA, na.rm = TRUE)*sqrt(n-1)/sqrt(n)
+r_espi_arcilla <- cor(x = datat$Media_ESPI.LTT, y = datat$Media_ARCILLA, use = 'complete.obs')
+r_espi_k <- cor(x = datat$Media_ESPI.LTT, y = datat$Media_K, use = 'complete.obs')
+r_arcilla_k <- cor(x = datat$Media_K, y = datat$Media_ARCILLA, use = 'complete.obs')
+b_arcilla <- (s_espi/s_arcilla)*(r_espi_arcilla - r_espi_k*r_arcilla_k)/(1-r_arcilla_k^2)
+b_arcilla
+coef(lmt)
+```
+  Comprobemos que el R2 es la correlacion entre observaciones y predichos al cuadrado:
+```{r}
+datat$pred <- fitted(lmt)
+r_obs_pred <- cor(x = datat$Media_ESPI.LTT, y = datat$pred, use = 'complete.obs')
+R2_con
+r_obs_pred^2
+```
+
+  Veamos la tolerancia y los VIF de nuestras regresoras. Corro un nuevo modelo con 3 regresoras.
+  
+```{r}
+f7 <-  Media_ESPI.LTT ~ Media_ARCILLA + Media_K + Media_CC
+lmt7 <- lm(formula = f7, data = datat, na.action = na.exclude)
+
+v <- vif(lmt7)
+tol <- 1/v
+tol_df <- data.frame(cbind(c('arcilla', 'K', 'Cu'), 
+                           v,
+                           tol))
+names(tol_df) <- c('name', 'vif', 'tolerancia')
+tol_df
+```
+  La arcilla y CC solo pueden explicar su varianza en un 15 o 16%, mientras que el potasio K debe un 72% de su varianza a si misma.
+
+
+

@@ -1,0 +1,1709 @@
+---
+title: "20210506_mlr"
+author: "Guillermina Senn"
+date: "5/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+  Este script es para explorar los datos (respuestas y covariables) a escala de las unidades homogeneas. 
+  1. Replicar lo que hace Mariano Cordoba en clase.
+  2. Ejercitar distintas librerias de graficos.
+
+## 0. Librerias y funciones
+
+```{r, warning=FALSE, echo=FALSE}
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(ggcorrplot)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(RColorBrewer) 
+```
+
+
+  Funciones:
+  
+```{r}
+corr_simple <- function(data = df, sig = 0.5){
+  #convert data to numeric in order to run correlations
+  #convert to factor first to keep the integrity of the data - each value will become a number rather than turn into NA
+  df_cor <- data %>% mutate_if(is.character, as.factor)
+  df_cor <- df_cor %>% mutate_if(is.factor, as.numeric)
+  #run a correlation and drop the insignificant ones
+  corr <- cor(df_cor)
+  #prepare to drop duplicates and correlations of 1     
+  corr[lower.tri(corr, diag=TRUE)] <- NA 
+  #drop perfect correlations
+  corr[corr == 1] <- NA 
+  #turn into a 3-column table
+  corr <- as.data.frame(as.table(corr))
+  #remove the NA values from above 
+  corr <- na.omit(corr) 
+  #select significant values  
+  corr <- subset(corr, abs(Freq) > sig) 
+  #sort by highest correlation
+  corr <- corr[order(-abs(corr$Freq)),] 
+  return(corr)
+}
+```
+
+## 1. Cargar los datos
+  
+```{r}
+path <- '../data/raw/descriptUnidadAnalisis/'
+```
+  
+  Voy a unir las variables. 
+  
+  1. Comienzo por las edaficas. Parece que todos los `.gpkg` tienen las mismas columnas. 
+  
+```{r, echo=FALSE}
+file_list <- list.files(paste(path, 'edafico', sep = ''))
+file_list <- str_remove_all(file_list, '.gpkg')
+
+# Cargo el primer .gpkg para usarlo de base
+for (filename in file_list[1]){
+  data <- st_read(
+    dsn = paste(path, 'edafico/', filename, '.gpkg', sep = ''),
+  )
+}
+
+```
+
+  Cargo el resto de los .gpkg y los voy uniendo a `data` a medida que los cargo. 
+  
+```{r, echo=FALSE}
+for (filename in file_list[2:length(file_list)]){
+  temp <- st_read(
+    dsn = paste(path, 'edafico/', filename, '.gpkg', sep = '')
+  )
+  temp <- temp[, 15:(ncol(temp)-1)]
+  data <- left_join(x = data, y = as.data.frame(temp))
+  print(paste('SIZE:', dim(data)))
+}
+```
+  
+  Chequeo el archivo generado:
+  
+```{r, echo=FALSE}
+# dim(data); dim(temp)
+# class(data); class(temp)
+# names(data)
+# head(data, 2)
+```
+  
+  Ahora cargo el resto de los archivos en `descriptUnidadAnalisis`.
+  
+  Cargo las coberturas que necesitan un tratamiento especial:
+
+```{r}
+filename <- 'Cobertura_N25_descrpt'
+c25 <- st_read(
+    dsn = paste(path, filename, '.gpkg', sep = '')
+  )
+c25 <- c25[, 15:ncol(c25)]
+names(c25)
+```
+
+```{r}
+filename <- 'Cobertura_N3_descrpt_'
+c3 <- st_read(
+    dsn = paste(path, filename, '.gpkg', sep = '')
+  )
+c3 <- c3[, 15:ncol(c3)]
+names(c3)
+``` 
+
+  Primero cargo la cobertura 25 completa:
+```{r}
+data <- left_join(x = data, y = as.data.frame(c25))
+print(paste('SIZE:', dim(data)))
+```
+  Luego obtengo los nombres de las columnas que estan en C3 pero no en C25, y les agrego el `id_unico` y la `geom`:
+
+```{r}
+# all_names <- union(names(c25), names(c3))
+# from_25 <- names(c25) 
+# from_3 <- names(c3)
+# inter <- intersect(from_25, from_3)
+# remain_c3 <- c('id_unico', setdiff(from_3, inter), 'geom')
+# remain_c3
+```
+  Finalmente uno las columnas de C3.
+  
+```{r}
+# c3 <- c3[, remain_c3]
+# data <- left_join(x = data, y = as.data.frame(c3))
+# print(paste('SIZE:', dim(data)))
+```
+  Ahora continuo con el resto de los archivos:
+  
+```{r, echo=FALSE}
+file_list <- list.files(paste(path, sep = ''))
+file_list <- str_remove_all(file_list, '.gpkg') # quito la extension
+file_list <- file_list[file_list != 'edafico'] # edafico es una carpeta
+file_list <- file_list[file_list != 'Cobertura_N3_descrpt_'] # ya la cargue
+file_list <- file_list[file_list != 'Cobertura_N25_descrpt'] # ya la cargue
+
+for (filename in file_list){
+  temp <- st_read(
+    dsn = paste(path, filename, '.gpkg', sep = '')
+  )
+  temp <- temp[, 15:ncol(temp)]
+  data <- left_join(x = data, y = as.data.frame(temp))
+  print(paste('SIZE:', dim(data)))
+}
+```
+
+```{r}
+names(data)
+data.frame(sapply(data.frame(data), function(x) sum(is.na(x))))
+```
+  Finalmente falta agregar los datos de sCOS y COV, que estan almacenados en otra carpeta:
+  
+```{r}
+path_int <- "../data/raw/productIntermedio/"
+filename <- 'CO_veg'
+temp <- st_read(
+    dsn = paste(path_int, filename, '.gpkg', sep = '')
+  )
+col_retain <- c('id_unico', 'CO_veg', 'geom')
+temp <- temp[, col_retain]
+names(temp)
+data <- left_join(x = data, y = as.data.frame(temp))
+print(paste('SIZE:', dim(data)))
+```
+```{r}
+path_int <- "../data/raw/productIntermedio/"
+filename <- 'areaEstudio_cos_mariano_descr'
+temp <- st_read(
+    dsn = paste(path_int, filename, '.gpkg', sep = '')
+  )
+temp <- temp[, 15:ncol(temp)]
+names(temp)
+data <- left_join(x = data, y = as.data.frame(temp))
+print(paste('SIZE:', dim(data)))
+```
+
+  Guardo el archivo.
+  
+```{r}
+st_write(
+  obj = data,
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg',
+  layer = 'cuenca',
+  driver = 'GPKG',
+  append = FALSE
+)
+```
+
+```{r}
+data <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+```
+
+```{r}
+names(data)
+data.frame(data)
+```
+
+
+## 2. Analisis exploratorio
+
+### 2.1 Sobre las unidades de analisis
+
+  La segmentacion se hace buscando unidades cuyas caracteristicas topograficas y propiedades del suelo sean homogeneas. Las variables consideradas fueron: NDVI, elevacion, MO, Arcilla, Temperatura y Precipitacion. La segmentacion se hico con SNIC. Las unidades tienen una mediana de 1455 Ha. y una media de 1420 Ha.
+
+```{r}
+seg <- st_read(dsn = '../data/raw/capas_sig/segmentacion/SNIC_c_1-9_s_7.shp')
+qtm(shp = seg, fill = 'label', title = 'Unidades espaciales homogeneas') + 
+  tm_legend(show = FALSE)
+```
+
+  Hay 4676 unidades con una media de 1388 Ha y una mediana de 1421 Ha. 
+```{r}
+area_ha <- st_area(seg)*0.0001
+area <- as.numeric(area_ha)
+summary(area)
+```
+  
+  Hay una unidad con el area cercana a 0:
+```{r}
+area[area < 10]
+```
+  Agreguemos el area como atributo y veamos si hay estructura espacial del area:
+  
+```{r}
+seg$area <- area
+qtm(shp = seg, fill = 'area')
+```
+  Creamos los vecinos:
+  
+```{r}
+seg_nb <- poly2nb(pl = seg, queen = TRUE)
+head(seg_nb, 2)
+```
+
+  Creamos los pesos estandarizados por fila:
+  
+```{r}
+seg_w <- nb2listw(neighbours = seg_nb, style = 'W', zero.policy = TRUE)
+print(seg_w, zero.policy = TRUE)
+seg$w <- seg_w$weights
+```
+  
+  Calculamos el indice de Moran por simulacion. No hay senales de que el area presente estructura espacial.
+  
+```{r}
+imoran <- moran.mc(x = seg$area, listw = seg_w, nsim = 1000, zero.policy = T)
+plot(imoran)
+imoran
+```
+
+
+### 2.2 Sobre las variables respuesta
+
+  Tenemos 187 variables, a dividir entre posibles respuestas y covariables. 
+  
+  Las variables respuesta podrian ser:
+  
+  * LPD (Land Productividy Dynamics). Los datos originales son con un calculo propio, usando NDVI y la metodologia de Ivits. Anios: 2001-2019. Es una variable categorica que marca el deterioro o enriquecimiento de la tierra. Obtenido de imagenes con una regresion a largo plazo para ver si decae o crece. 
+ 
+  Carguemos LPD a nivel de UH. 1-Deterioro, a 5-Enriquecimiento. El mejor estado de la tierra se ve cerca de las sierras, seguido por un sector bastante grande limitando con Provincia de Santa Fe. El peor estado se ve hacia el Sur, colindando con la Pampa (debe ser zona de cultivo). 
+  
+```{r}
+filename <- 'LPD_descrpt'
+lpd <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+qtm(lpd, 'Media_LPD')
+```
+
+  Segun los estadisticos resumen de LPD a traves del tiempo, la mitad de las UH no llegan a estar estables (estan estables y estresadas, o aun mas deterioradas). En promedio, espacial y temporal, en la cuenca tenemos UH estables pero estresadas.
+  
+```{r}
+summary(lpd[, c('Media_LPD', 'Mediana_LPD')])
+```
+ 
+```{r}
+a <- as.data.frame(lpd)
+par(mfrow=c(1,2))
+ggplot(a, aes(x = Media_LPD)) +
+  geom_histogram()
+ggplot(a, aes(x = Mediana_LPD)) +
+  geom_histogram()
+```
+ 
+ 
+  * ITT (no se que es). Obtenido de imagenes con una regresion a largo plazo para ver si decae o crece. Se puede categorizar o esta categorizado.
+ 
+  * Indices que miden el nivel de serivicios ecosistemicos. Estas variables sirven para caracterizar una region segun que tan buena sea para cuidar al medio ambiente. Podrian ser:
+     
+    + IP (Indice de Productividad del suelo). Predicho mediante una regresion RF a partir de covariables. El IP se usa como estimador de la fertilidad del suelo. Es una valoracion numerica de la capacidad productiva de los suelos (controlando por condiciones de manejo). 
+    
+    ** NO ESTA **
+
+```{r}
+filename <- ''
+lpd <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+qtm(lpd, '')
+```
+
+ 
+```{r}
+summary(lpd[, c('Media_LPD', 'Mediana_LPD')])
+```
+
+```{r}
+a <- as.data.frame(lpd)
+par(mfrow=c(1,2))
+ggplot(a, aes(x = Media_LPD)) +
+  geom_histogram()
+ggplot(a, aes(x = Mediana_LPD)) +
+  geom_histogram()
+```
+
+    + ESPI (Ecosystem Services Provision Index). Predicho mediante una regresion RF a partir de algunas covariables. No se como se estimo. Datos originales: calculo propio usando la informacion de NDVI y la metodologia de Teich et al., 2019. El ESPI es una alternativa a la media anual del NDVI, porque penaliza al NDVI en funcion de cuanta variabilidad hay dentro del anio. Se tiene el ESPI promedio para 2000-2020 a 250m de resolucion (o sea, un archivo raster donde cada pixel es el valor del ESPI). Tambien se tiene el ESPI tendencia (a nivel de sistema de gestion hidrica, por lo menos), calculo propio, para los mismos anios. En este caso se miden los cambios en el uso terrestre. 
+    
+    Carguemos el ESPI LTT.
+  
+```{r}
+filename <- 'ESPI_Ltt_descrpt'
+espi_ltt <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(espi_ltt)
+qtm(espi_ltt, 'Media_ESPI.LTT')
+```
+
+```{r}
+summary(espi_ltt[, c('Media_ESPI.LTT', 'Mediana_ESPI.LTT')])
+```
+  
+  La mitad de las unidades tienen un ESPI inferior a 2, y la media es de 1.8. 
+```{r}
+a <- as.data.frame(espi_ltt)
+par(mfrow=c(1,2))
+ggplot(a, aes(x = Media_ESPI.LTT)) +
+  geom_histogram()
+ggplot(a, aes(x = Mediana_ESPI.LTT)) +
+  geom_histogram()
+```
+
+  Ahora carguemos el ESPI promedio.
+```{r}
+filename <- 'ESPI_Mean_descrpt'
+espi_mean <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(espi_mean)
+qtm(espi_mean, 'Media_ESPI.Mean')
+```
+
+```{r}
+summary(espi_mean[, c('Media_ESPI.Mean', 'Mediana_ESPI.Mean')])
+```
+  
+  La mitad de las unidades tienen un ESPI inferior a 2, y la media es de 1.8. 
+```{r}
+a <- as.data.frame(espi_mean)
+par(mfrow=c(1,2))
+ggplot(a, aes(x = Media_ESPI.Mean)) +
+  geom_histogram()
+ggplot(a, aes(x = Mediana_ESPI.Mean)) +
+  geom_histogram()
+```
+
+  En este caso, el ESPI  ronda 0.3 en promedio. Cual es la diferencia entre el LTT y el Mean?
+
+
+    + COV (almacenamiento de C organico en biomasa). Predicho mediante una regresion RF a partir de algunas covariables. No entiendo bien como se estimo.
+
+```{r}
+filename <- 'CO_veg'
+cov <- readOGR(
+  dsn = paste('../data/raw/productIntermedio/CO_veg.gpkg', sep = ''),
+  layer = filename
+)
+names(cov)
+qtm(cov, 'CO_veg')
+```
+
+```{r}
+summary(cov[, c('CO_veg')])
+```
+  
+  La distribucion de CO en biomasa se ve muy asimetrica derecha, y la mayoria e las unidades (75%) tiene un valor inferior a 2.8, frente al maximo de 39 que se observa hacia el Noroeste de la provincia (que coincide bastante con las areas en situacion de enriquecimiento segun LPD).
+  
+```{r}
+ggplot(as.data.frame(cov), aes(x = CO_veg)) +
+  geom_histogram(binwidth = 0.05)
+```    
+
+    + sCOS (almacenamiento de C organico en el suelo). Predicho mediante una regresion RF a partir de algunas covariables. 
+    
+    **NOTA** Este es el C del suelo?
+    
+```{r}
+filename <- 'areaEstudio_cos_mariano_descr'
+cov <- readOGR(
+  dsn = paste('../data/raw/productIntermedio/areaEstudio_cos_mariano_descr.gpkg', sep = ''),
+  layer = filename
+)
+names(cov)
+qtm(cov, 'Media_tCOSha')
+```
+
+```{r}
+summary(cov[, c('Media_tCOSha', 'Mediana_tCOSha')])
+```
+  
+  No me gusta como esta esta variable, lo mismo que el C en biomasa. Hay un cambio muy abrupto entre zonas con alto y baja retencion de C por Ha. La media/mediana esta en 36, y las distribuciones son asimetricas derechas.
+  
+```{r}
+ggplot(as.data.frame(cov), aes(x = Media_tCOSha)) +
+  geom_histogram(binwidth = 2)
+
+ggplot(as.data.frame(cov), aes(x = Mediana_tCOSha)) +
+  geom_histogram(binwidth = 2)
+```   
+    
+    
+```{r}
+# mod_sCOS <-as.formula(sCOS~LPD+NDVI+Pendiente+Elevacion+Arena+Recurrecia)
+# mod_COV <-as.formula(COV~LPD+NDVI+Pendiente+Elevacion+Arena+LPD+Recurrecia)
+# mod_ESPI <-as.formula(ESPI~Pendiente+Elevacion+Arena+LPD+Recurrecia+
+#                         Act.estivales+Act.invernales+Acti.anu.doble.ciclo+
+#                         Sin.act.sig+CIC+P+Nt+Zn+MO+CC)
+# mod_IP <-as.formula(IP~LPD+NDVI+Pendiente+Elevacion+Arena+LPD+Recurrecia+
+#                       Act.estivales+Act.invernales+Acti.anu.doble.ciclo+
+#                       Sin.act.sig+CIC+P+Nt+Zn+MO+CC)
+```
+  
+  
+### 2.3 Sobre las covariables
+  
+  Primero miremos las edaficas.
+  
+#### 2.3.1 Arcilla
+
+  El contenido de arcilla aumenta hacia el NorEste (Pcia. de Santa Fe). 
+  
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'ARCILLA'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+temp$Media_ARCILLA <- replace(temp$Media_ARCILLA, temp$Media_ARCILLA == -Inf, NA)
+qtm(shp = temp, fill = 'Media_ARCILLA')
+```
+  Nuevamente observamos distribuciones multimodales por la dependencia espacial.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_ARCILLA)) +
+  geom_histogram(binwidth = 1)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_ARCILLA)) +
+  geom_histogram(binwidth = 1)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_ARCILLA, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.2 Arena
+
+  El contenido de arena aumenta hacia el Suroeste (Pcia. de La Pampa), opuesto al contenido de arcilla. 
+  
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'ARENA'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+temp$Media_ARENA <- replace(temp$Media_ARENA, temp$Media_ARENA == -Inf, NA)
+qtm(shp = temp, fill = 'Media_ARENA')
+```
+
+  Nuevamente observamos distribuciones multimodales por la dependencia espacial.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_ARENA)) +
+  geom_histogram(binwidth = 1)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_arena)) +
+  geom_histogram(binwidth = 1)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_ARENA, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+
+#### 2.3.3 CC (Coeficient of Curvature?)
+
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'CC'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_CC <- replace(temp$Media_CC, temp$Media_CC == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_CC')
+```
+
+  Nuevamente observamos distribuciones multimodales por la dependencia espacial. La media y la mediana del pico mayor estan por debajo de 15 (correspondiente a la zona centro y sur), y el segundo pico esta en 25 (correspondiente al NorEste).
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_CC)) +
+  geom_histogram(binwidth = 1)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_CC)) +
+  geom_histogram(binwidth = 1)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_CC, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 CE (Conductividad electrica)
+
+  La conductividad electrica crece hacia el Sur. No se ve a simple vista para un lego como yo con que otras variables podria estar relacionada.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'CE'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_CE <- replace(temp$Media_CE, temp$Media_CE == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_CE')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_CE)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_CE)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_CE, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 CE (Conductividad electrica del Extracto de Saturacion)
+
+  La conductividad electrica disminuye hacia el Sur. 
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'CEextsat'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_CEextsat <- replace(temp$Media_CEextsat, temp$Media_CEextsat == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_CEextsat')
+```
+
+  Observamos una distribucion un poco rara, CEextsatntrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_CEextsat)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_CEextsat)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_CEextsat, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 CIC (Capacidad de intercambio catonico)
+
+  La CIC crece hacia el NorEste.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'CIC'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_CIC <- replace(temp$Media_CIC, temp$Media_CIC == -Inf, NA)
+temp$Mediana_CIC <- replace(temp$Mediana_CIC, temp$Mediana_CIC == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_CIC')
+```
+
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+  La media (aunque no sea constante) en el territorio es de 14. 
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_CIC)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_CIC)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+  
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_CIC, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+
+#### 2.3.4 CO (Carbono organico del suelo)
+
+  Es mayor hacia el Oeste, cerca de las sierras, y tambien hacia el Este, no se que hay aqui.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'CO'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_CO <- replace(temp$Media_CO, temp$Media_CO == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_CO')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_CO)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_CO)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_CO, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 Cu (Coeficiente de uniformidad, o Cobre)
+
+  La conductividad electrica crece hacia el Sur. No se ve a simple vista para un lego como yo con que otras variables podria estar relacionada.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'Cu'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_Cu <- replace(temp$Media_Cu, temp$Media_Cu == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Cu')
+```
+
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Cu)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Cu)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_Cu, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+
+#### 2.3.4 Fe
+
+  La banda hacia el Este de la cuenca presenta mayor concentracion de Fe. La minima se ve hacia las sierras.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'Fe'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_Fe <- replace(temp$Media_Fe, temp$Media_Fe == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Fe')
+```
+
+
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Fe)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Fe)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_Fe, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 K
+
+  Alrededor de Villa Maria hay un sector con mayor concentracion de K
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'K'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_K <- replace(temp$Media_K, temp$Media_K == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_K')
+# mapview(temp, zcol = 'Media_K')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_K)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_K)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_K, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 LIMO
+
+  La cantidad de LIMO en el suelo crece hacia el NorEste.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'LIMO'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_LIMO <- replace(temp$Media_LIMO, temp$Media_LIMO == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_LIMO')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_LIMO)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_LIMO)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_LIMO, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 Mg 
+
+  Se ve un poco en todos lados...
+  
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'Mg'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_Mg <- replace(temp$Media_Mg, temp$Media_Mg == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Mg')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Mg)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Mg)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_Mg, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 Mn
+
+  La concentracion de Manganeso crecie hacia el Noreste.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'Mn'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_Mn <- replace(temp$Media_Mn, temp$Media_Mn == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Mn')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Mn)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Mn)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_Mn, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 Na
+
+  La concentracion de sodio no esta localizada en una direccion, si no que hay varios sectores con mayor concentracion (sierras, sur) y un punto con baja concentracion, cerca de Rio Cuarto.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'Na'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_Na <- replace(temp$Media_Na, temp$Media_Na == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Na')
+# mapview(temp, zcol = 'Media_Na')
+```
+
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Na)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Na)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_Na, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 Nt (Nitrogeno total)
+
+  Hay una franja que arranca en el Sur y pasa por el centro de la cuenca con mayor concentracion de N. En las sierras y hacia Santa Fe se ve baja concentracion.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'Nt'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_Nt <- replace(temp$Media_Nt, temp$Media_Nt == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Nt')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Nt)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Nt)) +
+  geom_histogram(binwidth = 0.5)
+```   
+ 
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_Nt, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 P
+
+  Aumenta hacia el NorEste. Igual hay algunos focoso con mayor concentracion que otros, no parece uniforme.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'P'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_P <- replace(temp$Media_P, temp$Media_P == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_P')
+
+# mapview(temp, zcol = 'Media_P')
+```
+
+  Observamos una distribucion un poco rara, centrada en 1, unimodal, y autocorrelacion espacial significativa.
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_P)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_P)) +
+  geom_histogram(binwidth = 0.5)
+```   
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_P, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 pH
+
+  Con una media de 6.5 en el territorio de la cuenca, el pH minimo es 5, hacia el Oeste de Rio Cuarto, y luego es 6-7 en toda la cuenca, con excepcion de algunas zonas diferenciadas con pH mayor, entre 7 y 9, como ser hacia las sierras.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'pH'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_pH <- replace(temp$Media_pH, temp$Media_pH == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_pH')
+```
+
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_pH)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_pH)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_pH, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+#### 2.3.4 Zn
+
+  La concentracion es generalmente igual en todo el territorio, de 0-5, con una media de 1.3. Hay una sola zona con alta concentracion, y dos zonas con baja concentracion, pero pequenas, y hacia el centro de la cuenca.
+
+```{r}
+path_ed <- paste(path, 'edafico/', sep = '')
+filename <- 'Zn'
+temp <- readOGR(
+  dsn = paste(path_ed, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+
+temp$Media_Zn <- replace(temp$Media_Zn, temp$Media_Zn == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Zn')
+```
+
+
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Zn)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Zn)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+  Hay autocorrelacion espacial. 
+```{r}
+nb <- poly2nb(pl = temp, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = temp$Media_Zn, listw = w, nsim = 1000, 
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+imoran$p.value
+```
+
+
+
+
+
+
+
+
+
+  Ahora miramos el resto.
+  
+#### 2.3.4 Cobertura N3
+
+  Muy tedioso mirar uno x 1. Por ejemplo, los cultivos irrigados se ven cerca de Rio Cuarto y de Villa Maria. Luego hay algunos altos porcentajes de Sorgo en Rio Cuarto.
+  
+```{r}
+filename <- 'Cobertura_N3_descrpt_'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+# temp$Media_CE <- replace(temp$Media_CE, temp$Media_CE == -Inf, NA)
+# temp$Mediana_CE <- replace(temp$Mediana_CE, temp$Mediana_CE == -Inf, NA)
+
+qtm(shp = temp, fill = 'Sorgo_Porc')
+# mapview(temp, zcol = 'Cultivos.anuales.irrigados_Porc')
+```
+  
+
+
+  
+#### 2.3.4 Cobertura N25
+
+
+```{r}
+filename <- 'Cobertura_N25_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+
+qtm(shp = temp, fill = 'Zonas.anegables_Porc')
+```
+
+
+
+  
+#### 2.3.4 DEM
+
+  La altitud decrece hacia el Este, siendo mayor en las sierras. En el territorio la altitud media es de 300 (msnm?).
+  
+```{r}
+filename <- 'DEM_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+temp$Media_DEM <- replace(temp$Media_DEM, temp$Media_DEM == -Inf, NA)
+temp$Mediana_DEM <- replace(temp$Mediana_DEM, temp$Mediana_DEM == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_DEM')
+```
+  
+```{r}
+media <- paste('Media_', 'DEM', sep = '')
+mediana <- paste('Mediana_', 'DEM', sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_DEM)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_DEM)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+
+  
+#### 2.3.4 NDVI LTT
+  
+  Mayor en las sierras y un poco hacia santa fe. En promedio, 1.95, frente al promedio de 0.47 NDVI que se tiene para NDVI Mean.
+
+```{r}
+filename <- 'NDVI_Ltt_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+temp$Media_NDVI.LTT <- replace(temp$Media_NDVI.LTT, temp$Media_NDVI.LTT == -Inf, NA)
+temp$Mediana_NDVI.LTT <- replace(temp$Mediana_NDVI.LTT, temp$Mediana_NDVI.LTT == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_NDVI.LTT')
+```
+  
+```{r}
+media <- 'Media_NDVI.LTT'
+mediana <- 'Mediana_NDVI.LTT'
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_NDVI.LTT)) +
+  geom_histogram(binwidth = 0.05)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_NDVI.LTT)) +
+  geom_histogram(binwidth = 0.05)
+```   
+
+#### 2.3.4 NDVI Mean
+  
+  Mayor en las sierras y un poco hacia santa fe. En promedio, 
+
+```{r}
+filename <- 'NDVI_Mean_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+qtm(shp = temp, fill = 'Media_NDVI.Mean')
+```
+  
+```{r}
+media <- 'Media_NDVI.Mean'
+mediana <- 'Mediana_NDVI.Mean'
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_NDVI.Mean)) +
+  geom_histogram(binwidth = 0.01)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_NDVI.Mean)) +
+  geom_histogram(binwidth = 0.01)
+```   
+
+
+  
+#### 2.3.4 MO
+
+  Hacia las sierras y hacia Santa Fe se observa mayor acumulacion de materia organica.
+  
+```{r}
+filename <- 'MO_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+temp$Media_MO <- replace(temp$Media_MO, temp$Media_MO == -Inf, NA)
+temp$Mediana_MO <- replace(temp$Mediana_MO, temp$Mediana_MO == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_MO')
+# mapview(temp, zcol = 'Media_MO')
+```
+  
+```{r}
+media <- paste('Media_', filename, sep = '')
+mediana <- paste('Mediana_', filename, sep = '')
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_MO)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_MO)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+
+  
+#### 2.3.4 Pendiente
+
+  La unica pendiente se ve en la zona de las sierras.
+  
+```{r}
+filename <- 'Pendiente_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+temp$Media_PEND <- replace(temp$Media_PEND, temp$Media_PEND == -Inf, NA)
+temp$Mediana_PEND <- replace(temp$Mediana_PEND, temp$Mediana_PEND == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_PEND')
+```
+  
+```{r}
+media <- 'Media_PEND'
+mediana <- 'Mediana_PEND'
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_PEND)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_PEND)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+
+  
+
+#### 2.3.4 recurrencia
+
+  La unica recurrencia se ve en la zona de las sierras.
+  
+```{r}
+filename <- 'recurrencia_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+temp$Media_Recurrecia <- replace(temp$Media_Recurrecia, temp$Media_Recurrecia == -Inf, NA)
+temp$Mediana_Recurrecia <- replace(temp$Mediana_Recurrecia, temp$Mediana_Recurrecia == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_Recurrecia')
+```
+  
+```{r}
+media <- 'Media_Recurrecia'
+mediana <- 'Mediana_Recurrecia'
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_Recurrecia)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_Recurrecia)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+
+#### 2.3.4 VUT
+
+  Esta todo con bajo VUT, solo se ven aisladas unidades con otro valor.
+  
+```{r}
+filename <- 'VUT_descrpt'
+temp <- readOGR(
+  dsn = paste(path, filename, '.gpkg', sep = ''),
+  layer = filename
+)
+names(temp)
+```
+
+```{r}
+temp$Media_VUT <- replace(temp$Media_VUT, temp$Media_VUT == -Inf, NA)
+temp$Mediana_VUT <- replace(temp$Mediana_VUT, temp$Mediana_VUT == -Inf, NA)
+
+qtm(shp = temp, fill = 'Media_VUT')
+```
+  
+```{r}
+media <- 'Media_VUT'
+mediana <- 'Mediana_VUT'
+summary(temp[, c(media, mediana)])
+```
+
+
+```{r}
+ggplot(as.data.frame(temp), aes(x = Media_VUT)) +
+  geom_histogram(binwidth = 0.5)
+
+ggplot(as.data.frame(temp), aes(x = Mediana_VUT)) +
+  geom_histogram(binwidth = 0.5)
+```   
+
+
+  
+
+
+### 2.4 Correlacion
+
+```{r}
+length(names(data))
+```
+
+  Una vez que cuente con todas las variables unidas, podria examinar la correlacion lineal ente ellas.
+  
+```{r}
+df <- as.data.frame(data[, 15:ncol(data)])
+```
+
+```{r}
+cols_mediana <- names(df)[grepl('Mediana_', names(df))]
+cols_min <- names(df)[grepl('Minimo_', names(df))]
+cols_max <- names(df)[grepl('Maximo_', names(df))]
+cols_delete <- c(cols_mediana, cols_min, cols_max)
+```
+
+```{r, warning=FALSE}
+df1 <- df %>%
+  select(-cols_delete)
+
+corr <- corr_simple(data = df1)
+head(corr, 2)
+```
+
+```{r}
+mtx_corr <- reshape2::acast(corr, Var1~Var2, value.var="Freq")
+ggcorrplot(mtx_corr, outline.col = 'white', lab = TRUE, insig = 'blank')
+```
+
+####  Analisis de correlaciones lineales para las variables respuesta:
+  
+  **LPD**: Es similar al ESPI y esta basado en NDVI.
+  
+  * La media LPD tiene correlacion 0.77 con la media de ESPI LTT, y 0.83 con la media NDVI.LTT. 
+  
+  * El CV_LPD tiene correlacion 0.54 con la media de ESPI Mean. El CV_LPD tiene correlacion negativa -0.62 con la media ESPI.LTT y -0.67 con la media NDVI.LTT.
+  
+  **ESPI.LTT**: ESPIs mayores se asocian con mayor NDVI y LPD. 
+  
+  * La media de ESPI.LTT tiene correlacion positiva 0.86 con la media de NDVI.LTT, y 0.77 con la media de LPD. 
+  
+  **ESPI.Mean**: ESPIs menores se asocian con sitios donde hay mucha actividad en verano.
+  
+  * La media de ESPI.Mean tiene correlacion positiva 0.81 con la media de NDVI.Mean, y negativa -0.72 con el porcentaje de actividades estivales.
+  
+  
+####  Analisis de correlaciones lineales para las covariables:
+  
+  **Recurrencia**: 
+  
+  * La media de la recurrencia se asocia 0.87 con porcentaje de cuerpos de agua, y moeradamente (0.5) con zonas anegables y CV_Pendiente. 
+  
+  **Pendiente**: a mayor pendiente, mas porcentaje de pastizal con o sin rocas.
+  
+  * La media de la pendiente se asocia 0.8 con la media DEM (obvio), y luego 0.65 con Pastizal natural con rocas o suelo desnudo y con Pastizal natural.
+  
+  **NDVI.Mean**: 
+  
+  * La media se asocia 0.81 con ESPI.Mean. 
+  * El CV se asocia 0.55 con el CV de la pendiente.
+  
+  **NDVI.LTT**: 
+  * La media se asocia 0.8+ con la media de ESPI.LTT y de LPD. 
+  * El CV se asocia 0.93 con el CV de ESPI.LTT y 0.7 con la pendiente. 
+  
+  **DEM**: 
+  * La media de la elevacion se asocia ~0.65 con pastizales naturales (con o sin suelo desnudo) y negativamente -0.5 con actividades anuales de doble ciclo. 
+  * El CV de DEM se asocia 0.63 con la media de la pendiente (a mayor pendiente, mas variabilidad en la elevacion).
+  
+  **Actividades anuales de doble ciclo**: Asociadas negativamente -0.53 con la elevacion. 
+  
+  **Zona urbana en proceso de consolidacion**: Asociadas 0.55 con zonas urbanas ya consolidadas.
+  
+  **Arbustales y matorrales**: Asociados 0.5 con la pendiente.
+  
+  **Pastizal natural**: Asociado 0.65 con elevacion y pendiente.
+  
+  **Pastizal natural con rocas o suelo desnudo**: Asociado 0.65+ con elevacion y pendiente.
+  
+  **Cuerpos de agua**: Asociados 0.87 con la recurrencia.
+  
+  **Zonas anegables**: Asociados 0.5 con la recurrencia.
+  
+  **Actividades estivales**: asociadas negativamente -0.72 con ESPI.Mean
+  
+  **Actividades anuales de doble ciclo**: Asociadas negativamente -0.5 con la elevacion. 
+  
+  
+  
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+  
+  
+  

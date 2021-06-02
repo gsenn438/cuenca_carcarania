@@ -1,0 +1,171 @@
+---
+title: "20210504_explore_processed"
+author: "Guillermina Senn"
+date: "5/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rgdal)
+library(sp)
+library(sf)
+library(tmap)
+```
+
+```{r}
+path <- '../data/external/data/productIntermedio/'
+```
+
+## Cuenca
+
+```{r}
+hill <- readGDAL(
+  fname = paste(path,
+                'cuenca/hill',
+                '.tif',
+                sep = '')
+)
+names(hill)
+qtm(hill)
+```
+## Edafico
+
+```{r}
+cx <- readGDAL(
+  fname = paste(path,
+                'edafico/CEextsat',
+                '.tif',
+                sep = '')
+)
+names(cx)
+qtm(cx)
+```
+## Sueltos
+
+```{r}
+ogrListLayers(paste(path, 'area_estudio.gpkg', sep = ''))
+area1 <- readOGR(
+  dsn = paste(path,
+              'area_estudio.gpkg',
+              sep = ''),
+  layer = 'area_estudio'
+)
+qtm(area1)
+```
+
+
+```{r}
+ogrListLayers(paste(path, 'area_estudio_Cobertura_descrpt.gpkg', sep = ''))
+area1 <- readOGR(
+  dsn = paste(path,
+              'area_estudio_Cobertura_descrpt.gpkg',
+              sep = ''),
+  layer = 'area_estudio_Cobertura_descrpt'
+)
+qtm(area1, fill = 'Zona.urbana.sin.consolidar_Porc')
+head(area1)
+```
+```{r}
+file <- 'estaciones_precipitaciones'
+ogrListLayers(paste(path,
+                    file,
+                    '.gpkg', 
+                    sep = ''))
+area <- readOGR(
+  dsn = paste(path,
+              file,
+              '.gpkg',
+              sep = ''),
+  layer = file
+)
+names(area)
+```
+
+```{r}
+head(area)
+qtm(area, fill = 'Lluvia.Acumulada..mm._Regi')
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

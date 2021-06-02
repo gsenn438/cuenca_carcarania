@@ -1,0 +1,2309 @@
+---
+title: "20210506_mlr"
+author: "Guillermina Senn"
+date: "5/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+  Este script es para 
+
+## 0. Librerias y funciones
+
+```{r, warning=FALSE, echo=FALSE}
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(lmtest)
+library(corrplot)
+library(car)
+library(ranger)
+library(MASS)
+library(INLA)
+library(brinla)
+
+library(stringr)
+library(dplyr)
+library(tidyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+## 1. Cargar y pre-procesar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+```
+ 
+## 2. Regresion Lineal Multiple con OLS
+
+  Estos modelos sirven como una introduccion a modelos mas complejos con errores correlacionados. Los estimados OLS son insesgados mientras los errores del modelo tengan media nula. Sin embargo, las estimaciones podrian tener alta varianza (ser ineficientes). [Schabenberger & Gotway]
+  
+  Formulacion del modelo lineal para datos espaciales con errores no correlacionados y homocedasticos:
+  
+  $$Z(s) = X(s)\beta + e(s), e(s) \sim (0, \sigma^2I)$$
+
+  Los estimadores se encuentran con OLS, se asumen insesgados, y las hipotesis se prueban con una prueba F o una prueba t. El analisis de residuos se hace con los residuos estudentizados, con los que se examinan los supuestos. 
+  
+  Si asumimos homocedasticidad, debemos chequear si queda autocorrelacion espacial en los residuos, con el I de Moran o con la estimacion de semivariogramas. 
+  
+  El ESPI (Ecosystem Services Provision Index) LTT se calculo usando la informacion de NDVI y la metodologia de Teich et al., 2019. El ESPI es una alternativa a la media anual del NDVI, porque penaliza al NDVI en funcion de cuanta variabilidad hay dentro del anio. El ESPI LTT es el ESPI tendencia (a nivel de sistema de gestion hidrica, por lo menos), calculo propio, para los anios 2001-2019. En este caso se miden los cambios en el uso de la tierra.
+  
+  Como el ESPI se calcula en base al NDVI, no incluiremos al NDVI como covariable. Tampoco incluimos a LPD, IP, ITT porque es el resto de las variables que queremos considerar como respuestas. Si incluyo al sCOS y COV por ahora.
+  
+  Las observaciones incompletas (~10%) se excluyen.
+  
+  Se trabaja con el estadistico resumen Media.
+  
+```{r}
+ndvi <- names(data)[grepl('NDVI', names(data))]
+cols_mediana <- names(data)[grepl('Mediana_', names(data))]
+cols_min <- names(data)[grepl('Minimo_', names(data))]
+cols_max <- names(data)[grepl('Maximo_', names(data))]
+cols_cv <- names(data)[grepl('CV_', names(data))]
+cero <- c('Salina_Porc', 'Plantaciones.perennes..frutales..de.secano_Porc',
+          'Plantaciones.perennes..frutales..irrigadas_Porc')
+aliased <- c('Plantaciones.forestales.maderables_Porc', 'CO_veg')
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label", 'id_unico', 'geom')
+respuestas <- c("Media_ESPI.Mean", 'Media_tCOSha', 'CO_veg')
+lpd <- names(data)[grepl('LPD', names(data))]
+```
+    
+### 2.1 Modelo 1: ESPI.LTT sin tocar colinealidad
+
+  Voy a comenzar con el modelo mas simple posible. Solo quito:
+
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas, lpd)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.1 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.1)
+names(data1.1)
+```
+  Ajusto un modelo lineal sin interacciones.
+  
+```{r}
+formula1 <- Media_ESPI.LTT ~ .
+lm1.1 <- lm(
+  formula = formula1,
+  data = data1.1,
+  na.action = na.exclude
+)
+summary(lm1.1)
+```
+
+#### 2.1.1 Comprobacion de supuestos
+
+```{r}
+data1.1$res <- residuals(object = lm1.1)
+data1.1$fit <- fitted(object = lm1.1)
+data1.1$res_stud <- rstudent(model = lm1.1)
+```
+
+ 1. Linealidad y heterocedasticidad
+ 
+ * **Residuos vs. las covariables**: Hay algunas covariables donde observo tendencia no lineal, leve, como cuerpos de agua, recurrencia, VUT, DEM. 
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.1)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.1, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+  
+ 
+  * **Residuos vs. Predichos**: no veo claro si hay heterocedasticidad o no. En las covariables si hay muchas donde se nota heterocedasticidad. 
+  
+```{r}
+ggplot(data1.1, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+# ggplot(data, aes(x = Media_ESPI.LTT)) +
+#   geom_histogram()
+# summary(data$Media_ESPI.LTT)
+```
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+bptest(lm1.1)
+```
+  2. Normalidad
+  
+  * **Residuos estandarizados vs. Normal**: no se observan grandes desviaciones de la normalidad. Segun Shapiro si.
+  
+```{r}
+qqnorm(data1.1$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.1$residuals, breaks = 50)
+shapiro.test(lm1.1$residuals)
+```
+  3. Independencia  
+ 
+  Analicemos el supuesto de independencia ploteando los residuos en cada unidad homogenea y calculando el I de Moran.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.1$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+# plot(imoran)
+moran1 <- imoran$p.value
+```
+
+
+#### 2.1.2 Puntos influyentes
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. En este caso, las observaciones 4502, 4318 y 4186 muestran alto leverage (son outliers) pero no gran distancia (De Cook), por lo que no vemos observaciones influyentes.
+  
+```{r}
+plot(lm1.1)
+```
+ 
+
+### 2.2 Modelo 2: ESPI.LTT quitando las casi perfectamente colineales
+
+  El modelo 1.2 es como el 1 pero quitando las variables altamente colineales, > 0.9.
+  
+```{r}
+colineales <- c('Media_CO', 'Media_CIC', 'Media_CC', 'Media_LIMO', 
+                   'Pasturas.naturales.manejadas_Porc', 'Media_ARCILLA',
+                   'Media_CEextsat', 'Media_Recurrecia', 'Media_Nt')
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas, colineales, lpd)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.2 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.2)
+```  
+  Ajusto:
+  
+```{r}
+formula2 <- Media_ESPI.LTT ~ .
+lm1.2 <- lm(
+  formula = formula1,
+  data = data1.2,
+  na.action = na.exclude
+)
+summary(lm1.2)
+```
+
+#### 2.2.1 Comprobacion de supuestos
+
+```{r}
+data1.2$res <- residuals(object = lm1.2)
+data1.2$fit <- fitted(object = lm1.2)
+data1.2$res_stud <- rstudent(model = lm1.2)
+```
+
+ 1. Linealidad y heterocedasticidad
+ 
+ * **Residuos vs. las covariables**: Hay algunas covariables donde observo tendencia no lineal, leve, como cuerpos de agua, recurrencia, VUT, DEM. 
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.2)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.2, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+  
+ 
+  * **Residuos vs. Predichos**: Parece que se ven patrones raros. En las covariables si hay muchas donde se nota heterocedasticidad. 
+  
+```{r}
+ggplot(data1.2, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+# ggplot(data, aes(x = Media_ESPI.LTT)) +
+#   geom_histogram()
+# summary(data$Media_ESPI.LTT)
+```
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+bptest(lm1.2)
+```
+  2. Normalidad
+  
+  * **Residuos estandarizados vs. Normal**: no se observan grandes desviaciones de la normalidad. Segun Shapiro si.
+  
+```{r}
+qqnorm(data1.2$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.2$residuals, breaks = 50)
+shapiro.test(lm1.2$residuals)
+```
+  3. Independencia  
+ 
+  Analicemos el supuesto de independencia ploteando los residuos en cada unidad homogenea y calculando el I de Moran.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.2$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran1 <- imoran$p.value
+```
+
+
+#### 2.2.2 Puntos influyentes
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. En este caso, las observaciones 4502, 4318 y 4186 muestran alto leverage (son outliers) pero no gran distancia (De Cook), por lo que no vemos observaciones influyentes.
+  
+```{r}
+plot(lm1.2)
+```
+ 
+
+
+
+
+### 2.3 Modelo 3: ESPI.LTT reemplazando colineales con PCA
+
+  Aqui voy a reemplazar los grupos de variables colineales por PCA. Los grupos son:
+  1. Cuerpos de agua y Recurrencia: 0.89
+  2. Las del suelo: ARENA, CO, CEextsat, Nt, CIC, CC, ARCILLA, LIMO y Mn: todas por encima de 0.85 y casi todas excepto Mn con mas de 0.9. 
+  
+```{r}
+cols_delete <- c(ndvi, lpd, cols_min, cols_mediana, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.3 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.3)
+```  
+
+  Primero hagamos PCA para el suelo:
+  
+```{r}
+corr_suelo <- c('Media_ARENA', 'Media_CO', 'Media_CEextsat', 'Media_Nt', 
+                'Media_CIC', 'Media_CC', 'Media_ARCILLA', 'Media_LIMO', 
+                'Media_Mn')
+pca_suelo <- prcomp(data1.3[complete.cases(data1.3), corr_suelo], scale = TRUE)
+res_pca_suelo <- predict(pca_suelo, newdata = data1.3)
+data1.3$pca1_suelo <- res_pca_suelo[, 1]
+data1.3$pca2_suelo <- res_pca_suelo[, 2]
+
+# Eliminamos las variables del suelo:
+data1.3 <- data1.3[, names(data1.3)[!(names(data1.3) %in% corr_suelo)]]
+```
+
+  Luego para los cuerpos de agua:
+  
+```{r}
+corr_agua <- c('Media_Recurrecia', 'Cuerpos.de.agua_Porc')
+pca_agua <- prcomp(data1.3[complete.cases(data1.3), corr_agua], scale = TRUE)
+res_pca_agua <- predict(pca_agua, newdata = data1.3)
+data1.3$pca1_agua <- res_pca_agua[, 1]
+
+fviz_pca_var(pca_agua,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+   
+
+# Eliminamos las variables del agua:
+data1.3 <- data1.3[, names(data1.3)[!(names(data1.3) %in% corr_agua)]]
+```
+
+  Ajusto:
+  
+```{r}
+formula3 <- Media_ESPI.LTT ~ .
+lm1.3 <- lm(
+  formula = formula1,
+  data = data1.3,
+  na.action = na.exclude
+)
+summary(lm1.3)
+```
+#### 2.3.1 Comprobacion de supuestos
+
+```{r}
+data1.3$res <- residuals(object = lm1.3)
+data1.3$fit <- fitted(object = lm1.3)
+data1.3$res_stud <- rstudent(model = lm1.3)
+```
+
+ 1. Linealidad y heterocedasticidad
+ 
+ * **Residuos vs. las covariables**: Hay algunas covariables donde observo tendencia no lineal, leve, como cuerpos de agua, recurrencia, VUT, DEM. 
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.3)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.3, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+  
+ 
+  * **Residuos vs. Predichos**: Parece que se ven patrones raros. En las covariables si hay muchas donde se nota heterocedasticidad. 
+  
+```{r}
+ggplot(data1.3, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+# ggplot(data, aes(x = Media_ESPI.LTT)) +
+#   geom_histogram()
+# summary(data$Media_ESPI.LTT)
+```
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+bptest(lm1.3)
+```
+  2. Normalidad
+  
+  * **Residuos estandarizados vs. Normal**: no se observan grandes desviaciones de la normalidad. Segun Shapiro si.
+  
+```{r}
+qqnorm(data1.3$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.3$residuals, breaks = 50)
+shapiro.test(lm1.3$residuals)
+```
+  3. Independencia  
+ 
+  Analicemos el supuesto de independencia ploteando los residuos en cada unidad homogenea y calculando el I de Moran.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.3$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran3 <- imoran$p.value
+```
+
+
+#### 2.3.2 Puntos influyentes
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. En este caso, las observaciones 4502, 4318 y 4186 muestran alto leverage (son outliers) pero no gran distancia (De Cook), por lo que no vemos observaciones influyentes.
+  
+```{r}
+plot(lm1.3)
+```
+ 
+
+
+
+
+  Finalmente miremos los residuos.
+  
+  * Residuos vs. Predichos: 
+```{r}
+
+data1.3$res <- residuals(object = lm1.3)
+data1.3$fit <- fitted(object = lm1.3)
+
+ggplot(data1.3, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+ggplot(data, aes(x = Media_ESPI.LTT)) +
+  geom_histogram()
+
+summary(data$Media_ESPI.LTT)
+```
+
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+library(lmtest)
+bptest(lm1.3)
+```
+
+  * Residuos estandarizados vs. Normal:
+```{r}
+data1.3$res_stud <- rstudent(model = lm1.3)
+qqnorm(data1.3$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.3$residuals, breaks = 50)
+shapiro.test(lm1.3$residuals)
+```
+  
+  * Residuos vs. las covariables:
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.3)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+```
+
+  
+```{r}
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.3, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+
+  Las variables con alguna tendencia no lineal son: 
+  * 1.1, 1.2 DEM, VUT, Cuerpos de agua, recurrencia  y quiza las pasturas naturales manejadas.
+  * 1.3 DEM, VUT, Cuerpos de agua, Recurrencia, Arbustales, zona urbana en proceso de consolidacion, podrian ser las pasturas implantadas.
+
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. Puntos influyentes:
+  * 1.1: ninguno
+  
+```{r}
+plot(lm1.3)
+```
+
+  Analicemos el supuesto de independencia con un grafico de residuos vs. indice de observacion.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.3$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+```
+```{r}
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran4 <- imoran$p.value
+```
+
+  
+  Examinemos el VIF de estos coeficientes del modelo 3.
+  
+```{r}
+v <- data.frame(car::vif(lm1.3)) %>%
+  filter(car..vif.lm1.3. > 5) %>%
+  arrange(desc(car..vif.lm1.3.))
+v
+```  
+  Mirando la correlacion, no hay grandes correlaciones lineales. 
+  
+```{r}
+corr <- data.frame(cor(data1.3[, row.names(v)], use = 'complete.obs'))
+
+print_high <- function(x){
+  indice_high <- x > 0.7 & x != 1
+  # indice_high <- x > 0.7 & x < 0.85
+  print(paste(row.names(corr)[indice_high],
+              x[indice_high]))
+}
+
+for (col in names(corr)){
+  print(col)
+  print_high(corr[, col])
+  print('---------------------------------------------')
+}
+```
+ 
+  Con un $R^2=0.48$ tenemos 29 variables significativas. 
+  
+```{r}
+t <- data.frame(cbind(summary(lm1.3)$coefficients[, 1], 
+                      summary(lm1.3)$coefficients[, 4]))
+names(t) <- c('estimate', 'pvalue')
+t %>%
+  # filter(pvalue < 0.05) %>%
+  arrange(pvalue)
+```
+
+  **NOTA**: Casualmente las variables mas significativas son las que tenian (o tienen, en el caso de DEM), algo de colinealidad.
+  
+  
+
+
+### 2.4 Modelo 4: ESPI.LTT con seleccion con RF
+
+  Aqui voy a usar solo las variables que eligio RF
+  
+```{r}
+sel_rf <- c("Actividades.estivales_Porc", "Media_MO", "Media_PEND",
+            "Pasturas.naturales.manejadas_Porc", "Media_VUT", "Media_DEM",
+            "Media_Recurrecia", "Media_Cu", 
+            "Actividades.anuales..doble.ciclo._Porc", "Media_ARCILLA", 
+            "Cuerpos.de.agua_Porc", "Media_CIC", "Media_CE", "Media_Na",
+            "Media_ESPI.LTT")
+cols_delete <- c(ndvi, lpd, cols_min, cols_mediana, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete) 
+                           & (names(data) %in% sel_rf)]
+data1.4 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.4)
+```  
+
+  Ajusto:
+  
+```{r}
+formula4 <- Media_ESPI.LTT ~ .
+lm1.4 <- lm(
+  formula = formula1,
+  data = data1.4,
+  na.action = na.exclude
+)
+summary(lm1.4)
+```
+#### 2.3.1 Comprobacion de supuestos
+
+```{r}
+data1.4$res <- residuals(object = lm1.4)
+data1.4$fit <- fitted(object = lm1.4)
+data1.4$res_stud <- rstudent(model = lm1.4)
+```
+
+ 1. Linealidad y heterocedasticidad
+ 
+ * **Residuos vs. las covariables**: Hay algunas covariables donde observo tendencia no lineal, leve, como cuerpos de agua, recurrencia, VUT, DEM. 
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.4)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.4, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+  
+ 
+  * **Residuos vs. Predichos**: Parece que se ven patrones raros. En las covariables si hay muchas donde se nota heterocedasticidad. 
+  
+```{r}
+ggplot(data1.4, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+# ggplot(data, aes(x = Media_ESPI.LTT)) +
+#   geom_histogram()
+# summary(data$Media_ESPI.LTT)
+```
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+bptest(lm1.4)
+```
+  2. Normalidad
+  
+  * **Residuos estandarizados vs. Normal**: no se observan grandes desviaciones de la normalidad. Segun Shapiro si.
+  
+```{r}
+qqnorm(data1.4$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.4$residuals, breaks = 50)
+shapiro.test(lm1.4$residuals)
+```
+  3. Independencia  
+ 
+  Analicemos el supuesto de independencia ploteando los residuos en cada unidad homogenea y calculando el I de Moran.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.4$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran4 <- imoran$p.value
+```
+
+
+#### 2.3.2 Puntos influyentes
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. En este caso, las observaciones 4502, 4318 y 4186 muestran alto leverage (son outliers) pero no gran distancia (De Cook), por lo que no vemos observaciones influyentes.
+  
+```{r}
+plot(lm1.4)
+```
+ 
+
+
+
+### 2.5 Modelo 5: ESPI.LTT sin tocar colinealidad y terminos polinomicos
+
+  Solo quito:
+
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+  Pero le agrego un termino cuadratico a:
+  * Cuerpos de agua
+  * Recurrencia
+  * DEM
+  * VUT
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.5 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.5)
+```
+  Ajusto un modelo lineal sin interacciones.
+  
+```{r}
+formula5 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+```
+
+```{r}
+lm1.5 <- lm(
+  formula = formula1,
+  data = data1.5,
+  na.action = na.exclude
+)
+summary(lm1.5)
+```
+
+#### 2.1.5 Comprobacion de supuestos
+
+```{r}
+data1.5$res <- residuals(object = lm1.5)
+data1.5$fit <- fitted(object = lm1.5)
+data1.5$res_stud <- rstudent(model = lm1.5)
+```
+
+ 1. Linealidad y heterocedasticidad
+ 
+ * **Residuos vs. las covariables**: Hay algunas covariables donde observo tendencia no lineal, leve, como cuerpos de agua, recurrencia, VUT, DEM. 
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.5)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.5, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+  
+ 
+  * **Residuos vs. Predichos**: no veo claro si hay heterocedasticidad o no. En las covariables si hay muchas donde se nota heterocedasticidad. 
+  
+```{r}
+ggplot(data1.5, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+# ggplot(data, aes(x = Media_ESPI.LTT)) +
+#   geom_histogram()
+# summary(data$Media_ESPI.LTT)
+```
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+bptest(lm1.5)
+```
+  2. Normalidad
+  
+  * **Residuos estandarizados vs. Normal**: no se observan grandes desviaciones de la normalidad. Segun Shapiro si.
+  
+```{r}
+qqnorm(data1.5$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.5$residuals, breaks = 50)
+shapiro.test(lm1.5$residuals)
+```
+  3. Independencia  
+ 
+  Analicemos el supuesto de independencia ploteando los residuos en cada unidad homogenea y calculando el I de Moran.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.5$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran5 <- imoran$p.value
+```
+
+
+#### 2.1.2 Puntos influyentes
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. En este caso, las observaciones 4502, 4318 y 4186 muestran alto leverage (son outliers) pero no gran distancia (De Cook), por lo que no vemos observaciones influyentes.
+  
+```{r}
+plot(lm1.5)
+```
+ 
+
+### 2.6 Modelo 6: ESPI.LTT quitando colineales y con terminos polinomicos
+
+  Quito:
+
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  * colineales > 0.9
+  
+  Pero le agrego un termino cuadratico a:
+  * DEM
+  * Cuerpos de agua
+  *VUT
+
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas, lpd, colineales)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.6 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.6)
+```
+
+  Ajusto un modelo lineal sin interacciones.
+  
+```{r}
+formula6 <- Media_ESPI.LTT ~ (Media_ARENA + Media_CE + Media_Cu + Media_Fe +
+Media_K + Media_Mg +                                       
+Media_Mn + Media_Na + Media_P+                                        
+Media_pH + Media_Zn +                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc +               
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + Media_VUT + I(Media_VUT^2))
+```
+
+```{r}
+lm1.6 <- lm(
+  formula = formula1,
+  data = data1.6,
+  na.action = na.exclude
+)
+summary(lm1.6)
+```
+
+#### 2.1.6 Comprobacion de supuestos
+
+```{r}
+data1.6$res <- residuals(object = lm1.6)
+data1.6$fit <- fitted(object = lm1.6)
+data1.6$res_stud <- rstudent(model = lm1.6)
+```
+
+ 1. Linealidad y heterocedasticidad
+ 
+ * **Residuos vs. las covariables**: Hay algunas covariables donde observo tendencia no lineal, leve, como cuerpos de agua, recurrencia, VUT, DEM. 
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.6)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.6, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+  
+ 
+  * **Residuos vs. Predichos**: no veo claro si hay heterocedasticidad o no. En las covariables si hay muchas donde se nota heterocedasticidad. 
+  
+```{r}
+ggplot(data1.6, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+# ggplot(data, aes(x = Media_ESPI.LTT)) +
+#   geom_histogram()
+# summary(data$Media_ESPI.LTT)
+```
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+bptest(lm1.6)
+```
+  2. Normalidad
+  
+  * **Residuos estandarizados vs. Normal**: no se observan grandes desviaciones de la normalidad. Segun Shapiro si.
+  
+```{r}
+qqnorm(data1.6$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.6$residuals, breaks = 50)
+shapiro.test(lm1.6$residuals)
+```
+  3. Independencia  
+ 
+  Analicemos el supuesto de independencia ploteando los residuos en cada unidad homogenea y calculando el I de Moran.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.6$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran6 <- imoran$p.value
+```
+
+
+#### 2.1.2 Puntos influyentes
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. En este caso, las observaciones 4502, 4318 y 4186 muestran alto leverage (son outliers) pero no gran distancia (De Cook), por lo que no vemos observaciones influyentes.
+  
+```{r}
+plot(lm1.6)
+```
+
+
+ 
+
+### 2.7 Modelo 7: ESPI.LTT con PCA y con terminos polinomicos
+
+  Quito:
+
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  * los grupos de colineales 'suelo' y 'agua' (los reemplazo con sus comp. pr.)
+  
+  Pero le agrego un termino cuadratico a:
+  * DEM
+  * pca1_agua
+  * VUT
+
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas, lpd, corr_suelo, corr_agua)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.7 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) %>%
+  mutate(pca1_suelo = res_pca_suelo[, 1],
+         pca2_suelo = res_pca_suelo[, 2],
+         pca1_agua = res_pca_agua[, 1])
+dim(data1.7)
+```
+
+  Ajusto un modelo lineal sin interacciones.
+  
+```{r}
+formula7 <- Media_ESPI.LTT ~ (
+Media_CE +                                      
+Media_Cu +                                      
+Media_Fe +                                       
+Media_K +                                      
+Media_Mg +                                      
+Media_Na +                                       
+Media_P +                                      
+Media_pH +                                      
+Media_Zn +
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc +               
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + Media_VUT + I(Media_VUT^2) +
+  pca1_agua + I(pca1_agua^2) + pca1_suelo + pca2_suelo)
+```
+
+```{r}
+lm1.7 <- lm(
+  formula = formula1,
+  data = data1.7,
+  na.action = na.exclude
+)
+summary(lm1.7)
+```
+
+#### 2.1.7 Comprobacion de supuestos
+
+```{r}
+data1.7$res <- residuals(object = lm1.7)
+data1.7$fit <- fitted(object = lm1.7)
+data1.7$res_stud <- rstudent(model = lm1.7)
+```
+
+ 1. Linealidad y heterocedasticidad
+ 
+ * **Residuos vs. las covariables**: Hay algunas covariables donde observo tendencia no lineal, leve, como cuerpos de agua, recurrencia, VUT, DEM. 
+  
+```{r}
+sign_cov <- data.frame(summary(lm1.7)$coefficients)
+sign_cov <- sign_cov %>%
+  filter(Pr...t.. < 0.05)%>%
+  arrange(Pr...t..)
+sign_cov <- sign_cov[!(row.names(sign_cov) %in% c('(Intercept)')), ]
+
+# for (variable in row.names(sign_cov)){
+#   print(variable)
+#   p <- ggplot(data1.7, aes_string(x = variable, y = 'res_stud')) +
+#     geom_point() +
+#     geom_smooth()
+#   print(p)
+# }
+```
+  
+ 
+  * **Residuos vs. Predichos**: no veo claro si hay heterocedasticidad o no. En las covariables si hay muchas donde se nota heterocedasticidad. 
+  
+```{r}
+ggplot(data1.7, aes(x = fit, y = res, col = Media_ESPI.LTT)) +
+  geom_point() +
+  geom_smooth()
+
+# ggplot(data, aes(x = Media_ESPI.LTT)) +
+#   geom_histogram()
+# summary(data$Media_ESPI.LTT)
+```
+  Por las dudas usamos un BP para chequear heterocedasticidad:
+```{r}
+bptest(lm1.7)
+```
+  2. Normalidad
+  
+  * **Residuos estandarizados vs. Normal**: no se observan grandes desviaciones de la normalidad. Segun Shapiro si.
+  
+```{r}
+qqnorm(data1.7$res_stud)
+abline(0, 1)
+```
+
+```{r}
+hist(lm1.7$residuals, breaks = 50)
+shapiro.test(lm1.7$residuals)
+```
+  3. Independencia  
+ 
+  Analicemos el supuesto de independencia ploteando los residuos en cada unidad homogenea y calculando el I de Moran.
+  
+```{r}
+new <- data.frame(cbind(data$id_unico, data1.7$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran7 <- imoran$p.value
+```
+
+
+#### 2.1.2 Puntos influyentes
+
+  Finalmente veamos algunos diagnosticos de la regresion para buscar puntos problematicos. En este caso, las observaciones 4502, 4318 y 4186 muestran alto leverage (son outliers) pero no gran distancia (De Cook), por lo que no vemos observaciones influyentes.
+  
+```{r}
+plot(lm1.7)
+```
+
+### 2.8 Modelo 8: ESPI.LTT ridge, original + poly
+
+  Solo quito:
+
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+  Pero le agrego un termino cuadratico a:
+  * Cuerpos de agua
+  * Recurrencia
+  * DEM
+  * VUT
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.8 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) %>%
+  dplyr::select(-Media_ESPI.LTT)
+
+# Estandarizo
+data1.8 <- data.frame(scale(data1.8))
+data1.8$Media_ESPI.LTT <- data$Media_ESPI.LTT
+dim(data1.8)
+```
+
+  Ajusto un modelo lineal sin interacciones con ridge.
+  
+```{r}
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+```
+
+  Busco el mejor lambda:
+```{r}
+# lm1.8 <- lm.ridge(
+#   formula = formula1,
+#   data = data1.8,
+#   lambda = seq(0, 1, length = 100),
+#   na.action = na.exclude
+# )
+# select(lm1.8)
+```
+
+  Ajusto:
+```{r}
+lm1.8 <- lm.ridge(
+  formula = formula1,
+  data = data1.8,
+  lambda = 0.081,
+  na.action = na.exclude
+)
+data.frame(coef(lm1.8))
+```
+
+
+
+### 2.9 Modelo 9: ESPI.LTT bayes, original, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+```{r}
+data1.9 <- data1.1
+# cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+#                  cero, aliased, others, respuestas)
+# cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+# data1.9 <- as.data.frame(data) %>%
+#   dplyr::select(cols_remain) 
+# dim(data1.9)
+formula9 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC + Media_CE + 
+    Media_CEextsat + Media_CIC + Media_CO + Media_Cu + Media_Fe + 
+    Media_K + Media_LIMO + Media_Mg + Media_Mn + Media_Na + Media_Nt + 
+    Media_P + Media_pH + Media_Zn + Monte_Porc + Arbustales.y.matorrales_Porc + 
+    Pastizal.natural_Porc + Pastizal.natural.con.rocas.o.suelo.desnudo_Porc + 
+    Rocas_Porc + Suelo.desnudo_Porc + Cuerpos.de.agua_Porc + 
+    Zonas.anegables_Porc + Cursos.de.agua_Porc + 
+    Zona.urbana.consolidada_Porc + Zona.urbana.en.proceso.de.consolidación_Porc + 
+    Zona.urbana.sin.consolidar_Porc + Infraestructura.vial_Porc + 
+    Actividades.invernales_Porc + Actividades.estivales_Porc + 
+    Actividades.anuales..doble.ciclo._Porc + Sin.actividad.significativa_Porc + 
+    Cultivos.anuales.irrigados_Porc + Pasturas.implantadas_Porc + 
+    Pasturas.naturales.manejadas_Porc + Media_DEM + 
+    Media_MO + Media_PEND + Media_Recurrecia + 
+    Media_VUT)
+
+```
+
+```{r}
+bay_inla.9 <- inla(
+  formula = formula9,
+  data = data1.1,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.9)
+```
+
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.9$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(bay_inla.9)
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.9$dic$dic
+```
+   Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.9$cpo$failure)
+hist(
+  x = bay_inla.9$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.9$cpo$pit))), 
+       bay_inla.9$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.9$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+ 
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+# plot(
+#   bay_inla.9$cpo$cpo, 
+#   bay_inla.9$cpo$cpo, 
+#   xlab="CPO for the full model", 
+#   ylab="CPO for the reduced model")
+# abline(0,1)
+```
+ 
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.9)
+# bri.lmresid.plot(bay_inla.9, bay_inla.9$Media_ARCILLA, xlab = "MO")
+# bri.lmresid.plot(bay_inla.9, bay_inla.9$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+
+```{r}
+
+bay_inla.9$
+new <- data.frame(cbind(data$id_unico, data1.7$res_stud))
+names(new) <- c('id', 'res')
+st_geometry(new) <- data$geom
+# qtm(new, fill = 'res')
+```
+
+  I de Moran nos dice que queda autocorrelacion espacial.
+```{r}
+nb <- poly2nb(pl = new, queen = TRUE)
+w <- nb2listw(neighbours = nb, style = 'W', zero.policy = TRUE)
+imoran <- moran.mc(x = new$res, listw = w, nsim = 1000,
+                   zero.policy = T, na.action = na.omit)
+plot(imoran)
+moran7 <- imoran$p.value
+```
+
+
+
+
+### 2.10 Modelo 10: ESPI.LTT bayes, sin colin, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+```{r}
+data1.10 <- data1.2
+formula10 <- Media_ESPI.LTT ~ (Media_ARENA + Media_CE + Media_Cu + Media_Fe + 
+    Media_K + Media_Mg + Media_Mn + Media_Na + Media_P + Media_pH + 
+    Media_Zn + Monte_Porc + Arbustales.y.matorrales_Porc + Pastizal.natural_Porc + 
+    Pastizal.natural.con.rocas.o.suelo.desnudo_Porc + Rocas_Porc + 
+    Suelo.desnudo_Porc + Cuerpos.de.agua_Porc + 
+    Zonas.anegables_Porc + Cursos.de.agua_Porc + Zona.urbana.consolidada_Porc + 
+    Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc + 
+    Infraestructura.vial_Porc + Actividades.invernales_Porc + 
+    Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc + 
+    Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc + 
+    Pasturas.implantadas_Porc + Media_DEM +  
+    Media_MO + Media_PEND + Media_VUT )
+```
+
+```{r}
+bay_inla.10 <- inla(
+  formula = formula10,
+  data = data1.10,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.10)
+```
+
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.10$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(bay_inla.10)
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.10$dic$dic
+```
+   Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.10$cpo$failure)
+hist(
+  x = bay_inla.10$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.10$cpo$pit))), 
+       bay_inla.10$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.10$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+ 
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+# plot(
+#   bay_inla.10$cpo$cpo, 
+#   bay_inla.10$cpo$cpo, 
+#   xlab="CPO for the full model", 
+#   ylab="CPO for the reduced model")
+# abline(0,1)
+```
+ 
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.10)
+# bri.lmresid.plot(bay_inla.10, bay_inla.10$Media_ARCILLA, xlab = "MO")
+# bri.lmresid.plot(bay_inla.10, bay_inla.10$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+
+
+
+
+
+
+
+
+
+### 2.11 Modelo 11: ESPI.LTT bayes, pca, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+```{r}
+data1.11 <- data1.3
+formula11 <- Media_ESPI.LTT ~ (Media_CE + Media_Cu + Media_Fe + Media_K + 
+    Media_Mg + Media_Na + Media_P + Media_pH + Media_Zn + Monte_Porc + 
+    Arbustales.y.matorrales_Porc + Pastizal.natural_Porc + Pastizal.natural.con.rocas.o.suelo.desnudo_Porc + 
+    Rocas_Porc + Suelo.desnudo_Porc + Zonas.anegables_Porc + 
+    Cursos.de.agua_Porc + Zona.urbana.consolidada_Porc + Zona.urbana.en.proceso.de.consolidación_Porc + 
+    Zona.urbana.sin.consolidar_Porc + Infraestructura.vial_Porc + 
+    Actividades.invernales_Porc + Actividades.estivales_Porc + 
+    Actividades.anuales..doble.ciclo._Porc + Sin.actividad.significativa_Porc + 
+    Cultivos.anuales.irrigados_Porc + Pasturas.implantadas_Porc + 
+    Media_DEM +  Media_MO + Media_PEND + Media_VUT + 
+    pca1_agua + pca1_suelo + 
+    pca2_suelo)
+```
+
+```{r}
+bay_inla.11 <- inla(
+  formula = formula11,
+  data = data1.11,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.11)
+```
+
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.11$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(bay_inla.11)
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.11$dic$dic
+```
+   Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.11$cpo$failure)
+hist(
+  x = bay_inla.11$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.11$cpo$pit))), 
+       bay_inla.11$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.11$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+ 
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+# plot(
+#   bay_inla.11$cpo$cpo, 
+#   bay_inla.11$cpo$cpo, 
+#   xlab="CPO for the full model", 
+#   ylab="CPO for the reduced model")
+# abline(0,1)
+```
+ 
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.11)
+# bri.lmresid.plot(bay_inla.11, bay_inla.11$Media_ARCILLA, xlab = "MO")
+# bri.lmresid.plot(bay_inla.11, bay_inla.11$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+
+### 2.12 Modelo 12: ESPI.LTT bayes, RF, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+```{r}
+data1.12 <- data1.4
+formula12 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_CE + Media_CIC + 
+  Media_Cu + Media_Na + Cuerpos.de.agua_Porc + Actividades.estivales_Porc +
+  Actividades.anuales..doble.ciclo._Porc + Pasturas.naturales.manejadas_Porc +
+  Media_DEM + Media_MO + Media_PEND + Media_Recurrecia + Media_VUT)
+```
+
+```{r}
+bay_inla.12 <- inla(
+  formula = formula12,
+  data = data1.12,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.12)
+```
+
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.12$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(bay_inla.12)
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.12$dic$dic
+```
+   Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.12$cpo$failure)
+hist(
+  x = bay_inla.12$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.12$cpo$pit))), 
+       bay_inla.12$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.12$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+ 
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+# plot(
+#   bay_inla.12$cpo$cpo, 
+#   bay_inla.12$cpo$cpo, 
+#   xlab="CPO for the full model", 
+#   ylab="CPO for the reduced model")
+# abline(0,1)
+```
+ 
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.12)
+# bri.lmresid.plot(bay_inla.12, bay_inla.12$Media_ARCILLA, xlab = "MO")
+# bri.lmresid.plot(bay_inla.12, bay_inla.12$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+
+### 2.13 Modelo 13: ESPI.LTT bayes, orig, poly, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+```{r}
+data1.13 <- data1.5
+formula13 <- formula5
+```
+
+```{r}
+bay_inla.13 <- inla(
+  formula = formula13,
+  data = data1.13,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.13)
+```
+
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.13$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(bay_inla.13)
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.13$dic$dic
+```
+   Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.13$cpo$failure)
+hist(
+  x = bay_inla.13$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.13$cpo$pit))), 
+       bay_inla.13$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.13$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+ 
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+# plot(
+#   bay_inla.13$cpo$cpo, 
+#   bay_inla.13$cpo$cpo, 
+#   xlab="CPO for the full model", 
+#   ylab="CPO for the reduced model")
+# abline(0,1)
+```
+ 
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.13)
+# bri.lmresid.plot(bay_inla.13, bay_inla.13$Media_ARCILLA, xlab = "MO")
+# bri.lmresid.plot(bay_inla.13, bay_inla.13$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+
+
+### 2.14 Modelo 14: ESPI.LTT bayes, sin colin, poly, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+```{r}
+data1.14 <- data1.6
+formula14 <- formula6
+```
+
+```{r}
+bay_inla.14 <- inla(
+  formula = formula14,
+  data = data1.14,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.14)
+```
+
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.14$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(bay_inla.14)
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.14$dic$dic
+```
+   Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.14$cpo$failure)
+hist(
+  x = bay_inla.14$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.14$cpo$pit))), 
+       bay_inla.14$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.14$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+ 
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+# plot(
+#   bay_inla.14$cpo$cpo, 
+#   bay_inla.14$cpo$cpo, 
+#   xlab="CPO for the full model", 
+#   ylab="CPO for the reduced model")
+# abline(0,1)
+```
+ 
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.14)
+# bri.lmresid.plot(bay_inla.14, bay_inla.14$Media_ARCILLA, xlab = "MO")
+# bri.lmresid.plot(bay_inla.14, bay_inla.14$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+
+
+### 2.15 Modelo 15: ESPI.LTT bayes, pca, poly, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+```{r}
+data1.15 <- data1.7
+formula15 <- formula7
+```
+
+```{r}
+bay_inla.15 <- inla(
+  formula = formula15,
+  data = data1.15,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.15)
+```
+
+  Miremosla como varianza en lugar de precision:
+```{r}
+# inla.emarginal(
+#   fun = function(x) 1/sqrt(x), 
+#   marg = bay_inla.15$marginals.hyperpar$`Precision for the Gaussian observations`
+# )
+bri.hyperpar.plot(bay_inla.15)
+```
+  Una medida de bondad de ajuste es el DIC:
+  
+```{r}
+bay_inla.15$dic$dic
+```
+   Ahora miro CPO y PIT. Veo bastante uniformidad en PIT (indica buen ajuste)
+  
+```{r}
+sum(bay_inla.15$cpo$failure)
+hist(
+  x = bay_inla.15$cpo$pit, 
+  main="", 
+  breaks = 10, 
+  xlab = "PIT"
+)
+```
+
+```{r}
+qqplot(qunif(ppoints(length(bay_inla.15$cpo$pit))), 
+       bay_inla.15$cpo$pit, 
+       main = "Q-Q plot for Unif(0,1)", 
+       xlab = "Theoretical Quantiles", 
+       ylab = "Sample Quantiles")
+qqline(bay_inla.15$cpo$pit, 
+       distribution = function(p) qunif(p), 
+       prob = c(0.1, 0.9))
+```
+ 
+  Usando el CPO como pseudo verosimilitud:
+```{r}
+# plot(
+#   bay_inla.15$cpo$cpo, 
+#   bay_inla.15$cpo$cpo, 
+#   xlab="CPO for the full model", 
+#   ylab="CPO for the reduced model")
+# abline(0,1)
+```
+ 
+  Analisis de residuos:
+```{r}
+bri.lmresid.plot(bay_inla.15)
+# bri.lmresid.plot(bay_inla.15, bay_inla.15$Media_ARCILLA, xlab = "MO")
+# bri.lmresid.plot(bay_inla.15, bay_inla.15$Cuerpos.de.agua_Porc, xlab = "MO")
+```
+
+## 3. Comparacion de modelos
+
+```{r}
+aic1.1 <- extractAIC(lm1.1)
+aic1.2 <- extractAIC(lm1.2)
+aic1.3 <- extractAIC(lm1.3)
+aic1.4 <- extractAIC(lm1.4)
+aic1.5 <- extractAIC(lm1.5)
+aic1.6 <- extractAIC(lm1.6)
+aic1.7 <- extractAIC(lm1.7)
+dic1.9 <- bay_inla.9$dic$dic
+dic1.10 <- bay_inla.10$dic$dic
+dic1.11 <- bay_inla.11$dic$dic
+dic1.12 <- bay_inla.12$dic$dic
+dic1.13 <- bay_inla.13$dic$dic
+dic1.14 <- bay_inla.14$dic$dic
+dic1.15 <- bay_inla.15$dic$dic
+
+s1.1 <- summary(lm1.1)
+s1.2 <- summary(lm1.2)
+s1.3 <- summary(lm1.3)
+s1.4 <- summary(lm1.4)
+s1.5 <- summary(lm1.5)
+s1.6 <- summary(lm1.6)
+s1.7 <- summary(lm1.7)
+s1.9 <- bay_inla.9$summary.fixed
+s1.10 <- bay_inla.10$summary.fixed
+s1.11 <- bay_inla.11$summary.fixed
+s1.12 <- bay_inla.12$summary.fixed
+s1.13 <- bay_inla.13$summary.fixed
+s1.14 <- bay_inla.14$summary.fixed
+s1.15 <- bay_inla.15$summary.fixed
+
+library(jtools)
+summ1.1 <- summ(lm1.1, part.corr = TRUE, scale = TRUE)$coeftable
+summ1.2 <- summ(lm1.2, part.corr = TRUE, scale = TRUE)$coeftable
+summ1.3 <- summ(lm1.3, part.corr = TRUE, scale = TRUE)$coeftable
+summ1.4 <- summ(lm1.4, part.corr = TRUE, scale = TRUE)$coeftable
+summ1.5 <- summ(lm1.5, part.corr = TRUE, scale = TRUE)$coeftable
+summ1.6 <- summ(lm1.6, part.corr = TRUE, scale = TRUE)$coeftable
+summ1.7 <- summ(lm1.7, part.corr = TRUE, scale = TRUE)$coeftable
+
+r1.1 <- s1.1$adj.r.squared
+r1.2 <- s1.2$adj.r.squared
+r1.3 <- s1.3$adj.r.squared
+r1.4 <- s1.4$adj.r.squared
+r1.5 <- s1.5$adj.r.squared
+r1.6 <- s1.6$adj.r.squared
+r1.7 <- s1.7$adj.r.squared
+
+ncoef1.1 <- sum(s1.1$coefficients[,4] < 0.05)
+ncoef1.2 <- sum(s1.2$coefficients[,4] < 0.05)
+ncoef1.3 <- sum(s1.3$coefficients[,4] < 0.05)
+ncoef1.4 <- sum(s1.4$coefficients[,4] < 0.05)
+ncoef1.5 <- sum(s1.5$coefficients[,4] < 0.05)
+ncoef1.6 <- sum(s1.6$coefficients[,4] < 0.05)
+ncoef1.7 <- sum(s1.7$coefficients[,4] < 0.05)
+
+comparacion <- data.frame(cbind(
+  c('lm1.1', 'lm1.2', 'lm1.3', 'lm1.4', 'lm1.5', 'lm1.6', 'lm1.7',
+    'lm1.9', 'lm1.10', 'lm1.11', 'lm1.12', 'lm1.13', 'lm1.14', 'lm1.15'),
+  c('original', 'sin_colin', 'pca', 'rf', 'original_poly', 'sin_colin_poli', 
+    'pca_poli', 'bay_orig', 'bay_sin_colin', 'bay_pca', 'bay_rf', 
+    'bay_orig_poly', 'bay_sin_colin_poli', 
+    'bay_pca_poli'),
+  c(r1.1, r1.2, r1.3, r1.4, r1.5, r1.6, r1.7, rep(NA, 7)),
+  c(aic1.1[1], aic1.2[1], aic1.3[1], aic1.4[1], aic1.5[1], aic1.6[1], aic1.7[1],
+    rep(NA, 7)),
+  c(aic1.1[2], aic1.2[2], aic1.3[2], aic1.4[2], aic1.5[2], aic1.6[2], aic1.7[2],
+    dic1.9, dic1.10, dic1.11, dic1.12, dic1.13, dic1.14, dic1.15),
+  c(ncoef1.1, ncoef1.2, ncoef1.3, ncoef1.4, ncoef1.5, ncoef1.6, ncoef1.7,
+    rep(NA, 7))
+  ))
+names(comparacion) <- c('modelo', 'desc', 'r2_aj', 'df', 'AIC/DIC', 'nr_sig_coef')
+comparacion
+
+```
+
+**Conclusion:** El mejor modelo es el original con terminos polinomicos, seguido por el modelo al que se le quitaron las variables altamente colineales con terminos polinomicos. El peor modelo es aquel donde se seleccionaron las variables con RF.
+
+Me gustaria poder entender cuales son las variables que hacen que el R2 me baje, individualmente. Pero... es correcto usar los coeficientes de correlacion semiparcial para seleccion de modelos? (creo que eran estos)
+
+Por otro lado, falta interaccion.
+
+
+
+## 4. Comparacion de coeficientes
+
+```{r}
+coef1.1 <- data.frame(s1.1$coefficients)
+coef1.1$stand_coef <- summ1.1[, 1]
+coef1.1$semipart <- summ1.1[, 6]
+coef1.1$varname <- row.names(coef1.1)
+coef1.1$modelo <- '1-orig'
+
+coef1.2 <- data.frame(s1.2$coefficients)
+coef1.2$stand_coef <- summ1.2[, 1]
+coef1.2$semipart <- summ1.2[, 6]
+coef1.2$varname <- row.names(coef1.2)
+coef1.2$modelo <- '2-s/colin'
+
+coef1.3 <- data.frame(s1.3$coefficients)
+coef1.3$stand_coef <- summ1.3[, 1]
+coef1.3$semipart <- summ1.3[, 6]
+coef1.3$varname <- row.names(coef1.3)
+coef1.3$modelo <- '3-pca'
+
+coef1.4 <- data.frame(s1.4$coefficients)
+coef1.4$stand_coef <- summ1.4[, 1]
+coef1.4$semipart <- summ1.4[, 6]
+coef1.4$varname <- row.names(coef1.4)
+coef1.4$modelo <- '4-rf'
+
+coef1.5 <- data.frame(s1.5$coefficients)
+coef1.5$stand_coef <- summ1.5[, 1]
+coef1.5$semipart <- summ1.5[, 6]
+coef1.5$varname <- row.names(coef1.5)
+coef1.5$modelo <- '5-orig_poly'
+
+coef1.6 <- data.frame(s1.6$coefficients)
+coef1.6$stand_coef <- summ1.6[, 1]
+coef1.6$semipart <- summ1.6[, 6]
+coef1.6$varname <- row.names(coef1.6)
+coef1.6$modelo <- '6-s/colin_poly'
+
+coef1.7 <- data.frame(s1.7$coefficients)
+coef1.7$stand_coef <- summ1.7[, 1]
+coef1.7$semipart <- summ1.7[, 6]
+coef1.7$varname <- row.names(coef1.7)
+coef1.7$modelo <- '7-pca_poly'
+```
+
+```{r}
+coef1.1 <- data.frame(s1.1$coefficients)
+coef1.1$stand_coef <- summ1.1[, 1]
+coef1.1$semipart <- summ1.1[, 6]
+coef1.1$varname <- row.names(coef1.1)
+coef1.1$modelo <- '2-orig'
+
+
+coef1.2 <- data.frame(s1.2$coefficients)
+coef1.2$stand_coef <- summ1.2[, 1]
+coef1.2$semipart <- summ1.2[, 6]
+coef1.2$varname <- row.names(coef1.2)
+coef1.2$modelo <- '2-s/colin'
+
+coef1.3 <- data.frame(s1.3$coefficients)
+coef1.3$stand_coef <- summ1.3[, 1]
+coef1.3$semipart <- summ1.3[, 6]
+coef1.3$varname <- row.names(coef1.3)
+coef1.3$modelo <- '3-pca'
+
+coef1.4 <- data.frame(s1.4$coefficients)
+coef1.4$stand_coef <- summ1.4[, 1]
+coef1.4$semipart <- summ1.4[, 6]
+coef1.4$varname <- row.names(coef1.4)
+coef1.4$modelo <- '4-rf'
+
+coef1.5 <- data.frame(s1.5$coefficients)
+coef1.5$stand_coef <- summ1.5[, 1]
+coef1.5$semipart <- summ1.5[, 6]
+coef1.5$varname <- row.names(coef1.5)
+coef1.5$modelo <- '5-orig_poly'
+
+coef1.6 <- data.frame(s1.6$coefficients)
+coef1.6$stand_coef <- summ1.6[, 1]
+coef1.6$semipart <- summ1.6[, 6]
+coef1.6$varname <- row.names(coef1.6)
+coef1.6$modelo <- '6-s/colin_poly'
+
+coef1.7 <- data.frame(s1.7$coefficients)
+coef1.7$stand_coef <- summ1.7[, 1]
+coef1.7$semipart <- summ1.7[, 6]
+coef1.7$varname <- row.names(coef1.7)
+coef1.7$modelo <- '7-pca_poly'
+```
+
+
+```{r}
+s1.9$Pr...t.. <- ifelse((s1.9$`0.025quant` < 0) & (s1.9$`0.975quant` > 0), 1, 0)
+coef1.9 <- s1.9[, c('mean', 'sd', 'Pr...t..')]
+coef1.9$stand_coef <- NA
+coef1.9$semipart <- NA
+coef1.9$varname <- row.names(coef1.9)
+coef1.9$modelo <- '9-bayes_orig'
+
+s1.10$Pr...t.. <- ifelse((s1.10$`0.025quant` < 0) & (s1.10$`0.975quant` > 0), 1, 0)
+coef1.10 <- s1.10[, c('mean', 'sd', 'Pr...t..')]
+coef1.10$stand_coef <- NA
+coef1.10$semipart <- NA
+coef1.10$varname <- row.names(coef1.10)
+coef1.10$modelo <- '10-bayes_s/colin'
+
+s1.11$Pr...t.. <- ifelse((s1.11$`0.025quant` < 0) & (s1.11$`0.975quant` > 0), 1, 0)
+coef1.11 <- s1.11[, c('mean', 'sd', 'Pr...t..')]
+coef1.11$stand_coef <- NA
+coef1.11$semipart <- NA
+coef1.11$varname <- row.names(coef1.11)
+coef1.11$modelo <- '11-bayes_pca'
+
+s1.12$Pr...t.. <- ifelse((s1.12$`0.025quant` < 0) & (s1.12$`0.975quant` > 0), 1, 0)
+coef1.12 <- s1.12[, c('mean', 'sd', 'Pr...t..')]
+coef1.12$stand_coef <- NA
+coef1.12$semipart <- NA
+coef1.12$varname <- row.names(coef1.12)
+coef1.12$modelo <- '12-bayes_rf'
+
+s1.13$Pr...t.. <- ifelse((s1.13$`0.025quant` < 0) & (s1.13$`0.975quant` > 0), 1, 0)
+coef1.13 <- s1.13[, c('mean', 'sd', 'Pr...t..')]
+coef1.13$stand_coef <- NA
+coef1.13$semipart <- NA
+coef1.13$varname <- row.names(coef1.13)
+coef1.13$modelo <- '13-bayes_orig_poly'
+
+s1.14$Pr...t.. <- ifelse((s1.14$`0.025quant` < 0) & (s1.14$`0.975quant` > 0), 1, 0)
+coef1.14 <- s1.14[, c('mean', 'sd', 'Pr...t..')]
+coef1.14$stand_coef <- NA
+coef1.14$semipart <- NA
+coef1.14$varname <- row.names(coef1.14)
+coef1.14$modelo <- '14-bayes_s/colin_poly'
+
+s1.15$Pr...t.. <- ifelse((s1.15$`0.025quant` < 0) & (s1.15$`0.975quant` > 0), 1, 0)
+coef1.15 <- s1.15[, c('mean', 'sd', 'Pr...t..')]
+coef1.15$stand_coef <- NA
+coef1.15$semipart <- NA
+coef1.15$varname <- row.names(coef1.15)
+coef1.15$modelo <- '15-bayes_pca_poly'
+```
+
+
+
+```{r}
+coef_comp_ols <- rbind(coef1.1, coef1.2, coef1.3, coef1.4, coef1.5, coef1.6, coef1.7)
+coef_comp_ols <- coef_comp_ols[, names(coef_comp_ols)[!(names(coef_comp_ols) %in% c('t.value'))]]
+
+coef_comp_bay <- rbind(coef1.9, coef1.10, coef1.11, coef1.12, coef1.13, coef1.14, coef1.15)
+names(coef_comp_bay)[1:2] <- c('Estimate', 'Std..Error')
+
+coef_comp <- rbind(coef_comp_ols, coef_comp_bay)
+```
+ 
+  Primero quiero hacer una comparacion en tablas, donde cada fila sea una variable, y cada columna sea el valor del p, SE y estimado que obtuvo en cada modelo.
+  
+```{r}
+coef_comp_pivot <- coef_comp %>%
+  pivot_wider(id_cols = 'varname', 
+              values_from = c('Pr...t..', 'Estimate', 'Std..Error', 'stand_coef', 'semipart'),
+              names_from = c('modelo')
+              )
+```
+
+  Creo grafico de y = modelo vs x = magnitud de la estimacion, para cada variable. Coloreo la magnitud por el p value.
+```{r}
+corr_suelo <- c('Media_ARENA', 'Media_CO', 'Media_CEextsat', 'Media_Nt', 
+                'Media_CIC', 'Media_CC', 'Media_ARCILLA', 'Media_LIMO', 
+                'Media_Mn')
+
+
+df <- coef_comp[coef_comp$varname %in% corr_suelo[1:4], ]
+df = df %>%
+  mutate(Pr...t.. = ifelse(Pr...t.. < 0.05, 'sig', 'nosig')
+         # modelo = factor(modelo, levels = df$modelo)
+         )
+p <- ggplot(df, aes(x = modelo, y = Estimate, color = varname)) +
+  geom_point(aes(size = Pr...t..)) +
+  ggtitle(v) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+print(p)
+
+```
+
+  Para otras:
+```{r}
+
+names(data1.1)
+
+vars <- c("Actividades.estivales_Porc", "Media_DEM", "Media_MO", "Actividades.anuales..doble.ciclo._Porc",
+          "Media_VUT","Pastizal.natural.con.rocas.o.suelo.desnudo_Porc" )
+for (v in vars){
+  print(v)
+  df <- coef_comp[coef_comp$varname == v, ]
+  df = df %>%
+    mutate(modelo = factor(modelo, levels = df$modelo),
+           Pr...t.. = ifelse(Pr...t.. < 0.05, 'sig', 'nosig'))
+  p <- ggplot(df, aes(x = modelo, y = Estimate, color = Pr...t..)) +
+    geom_point() +
+    ggtitle(v) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  print(p)
+}
+
+
+```
+
+
+
+```{r}
+for (v in corr_suelo){
+  print(v)
+  df <- coef_comp[coef_comp$varname == v, ]
+  df = df %>%
+    mutate(modelo = factor(modelo, levels = df$modelo),
+           Pr...t.. = ifelse(Pr...t.. < 0.05, 'sig', 'nosig'))
+  p <- ggplot(df, aes(x = modelo, y = Estimate, color = Pr...t..)) +
+    geom_point() +
+    ggtitle(v) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  print(p)
+}
+
+
+```
+
+
+```{r}
+for (v in coef_comp_pivot$varname){
+  print(v)
+  df <- coef_comp_pivot[coef_comp_pivot$varname == v, ]
+  df = df %>%
+  pivot_longer(
+    cols = names(df)[2:ncol(df)],
+    names_to = c('variable', 'modelo'),
+    names_sep = '-'
+    ) %>%
+  mutate(variable = str_remove(variable, '_.*'))
+  p <- ggplot(df, aes(x = modelo, y = value, color = variable)) +
+    geom_point() +
+    ggtitle(v)
+  print(p)
+}
+```
+
+  **Conclusión**: Las tendencias no lineales y la presencia de colinealidad son las que más afectan a los estimadores. Es notorio el cambio en la magnitud de los coeficientes con la incorporación de términos polinómicos. Tambièn hay cambios en la magnitud cuando reemplazo los grupos colineales por PCA y cuando quito variables colineales. El error estandar se mantiene en muchos casos igual. Sí cambia en los grupos de variables colineales: por ejemplo en Cuerpos de Agua, baja cuando quito la recurrencia. 
+  
+  Para ver la importancia de las variables quiza podria pensar en estandarizar los coeficientes de regresion o en mirar los coeficientes de correlacion semiparcial. 
+  
+  Boxplots de coeficientes de correlacion semiparcial al cuadrado (porcentaje de la varianza total que explica la informacion individual de una predictora:
+  
+```{r}
+# coef_comp_median <- coef_comp_ols %>%
+#   select(varname, semipart) %>%
+#   mutate(semipart = semipart^2)%>%
+#   group_by(varname) %>%
+#   summarize(median_semipart = median(semipart))%>%
+#   print
+# coef_comp <- merge(coef_comp, coef_comp_median)
+```
+
+```{r}
+p_semi <- ggplot(coef_comp_ols %>% 
+                   mutate(semipart = semipart^2), 
+                 aes(y = reorder(varname, semipart, median), x = semipart)) + 
+  geom_boxplot() 
+  # theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ggsave('semipartial_boxplot.png')
+```
+  Boxplots de coeficientes de regresion estandarizados:
+
+
+```{r}
+coef_reg_median <- coef_comp_ols %>%
+  select(varname, stand_coef) %>%
+  group_by(varname) %>%
+  summarize(median_stand = median(stand_coef))%>%
+  print
+coef_reg <- merge(coef_comp_ols, coef_reg_median)
+```
+
+```{r}
+p_coef <- ggplot(coef_reg, 
+                 aes(y = reorder(varname, stand_coef, median), x = stand_coef)) + 
+  geom_boxplot() 
+  # theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ggsave('stand_coef_boxplot.png')
+```
+ 
+  De ultima hacer, para el mejor modelo, un grafico de barras mostrando los coef de regresion estandarizados.
+
+```{r}
+ggplot(coef1.5, aes(y = reorder(varname, stand_coef, mean), x = stand_coef)) +
+  geom_bar(stat='identity') +
+  ggtitle('Modelo 5: todas las variables + polinomico')
+ggsave('stand_coef_m5.png')
+```
+
+```{r}
+ggplot(coef1.6, aes(y = reorder(varname, stand_coef, mean), x = stand_coef)) +
+  geom_bar(stat='identity') +
+  ggtitle('Modelo 6: sin colineales + polinomico')
+ggsave('stand_coef_m6.png')
+```
+
+```{r}
+ggplot(coef1.7, aes(y = reorder(varname, stand_coef, mean), x = stand_coef)) +
+  geom_bar(stat='identity') +
+  ggtitle('Modelo 7: pca + polinomico')
+ggsave('stand_coef_m7.png')
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+
+
