@@ -17,7 +17,7 @@ library(rgdal)
 ```
 
 ```{r}
-path <- '../data/external/data/descriptUnidadAnalisis/'
+path <- '../data/raw/descriptUnidadAnalisis/'
 ```
 
 ## Edaficas

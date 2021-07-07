@@ -1,0 +1,707 @@
+---
+title: "20210517_bayesian_reg_inla"
+author: "Guillermina Senn"
+date: "5/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+library(INLA)
+library(brinla)
+
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(car)
+library(MASS)
+library(ranger)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(GGally)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+
+## 1. Cargar y pre-procesar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+st_geometry(data) <- data$geom
+```
+
+```{r}
+tm_shape(data) + 
+  tm_fill('id_unico', title = 'Polygon ID', palette = 'Reds') +
+  tm_borders(col = 'white', lwd = 0.1) +
+  tm_layout('Area of study',
+          legend.title.size = 1,
+          legend.text.size = 0.6,
+          legend.position = c("left","top"),
+          legend.bg.color = "white",
+          legend.bg.alpha = 1,
+          legend.outside = TRUE,
+          frame = FALSE)
+# tmaptools::palette_explorer()
+```
+
+
+
+## 2. Modelado
+
+```{r}
+ndvi <- names(data)[grepl('NDVI', names(data))]
+cols_mediana <- names(data)[grepl('Mediana_', names(data))]
+cols_min <- names(data)[grepl('Minimo_', names(data))]
+cols_max <- names(data)[grepl('Maximo_', names(data))]
+cols_cv <- names(data)[grepl('CV_', names(data))]
+cero <- c('Salina_Porc', 'Plantaciones.perennes..frutales..de.secano_Porc',
+          'Plantaciones.perennes..frutales..irrigadas_Porc')
+aliased <- c('Plantaciones.forestales.maderables_Porc', 'CO_veg')
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label", 'id_unico', 'geom')
+respuestas <- c("Media_ESPI.Mean", 'Media_tCOSha', 'CO_veg')
+lpd <- names(data)[grepl('LPD', names(data))]
+```
+
+  
+  Primero creo el dataset espacial y calculo las vecindades.
+  
+```{r}
+class(data)
+adj <- poly2nb(data)
+crds <-  st_coordinates(st_centroid(data))
+plot(adj, coords = crds, pch = 16, cex = 0.01)
+```
+
+  Ahora calculo las matrices de pesos espaciales para los estilos binario y estandarizado por fila.
+
+```{r}
+wb <- nb2mat(adj, style = "B", zero.policy = TRUE) 
+ww <- nb2mat(adj, style = "W", zero.policy = TRUE) 
+```
+  
+
+```{r}
+# cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+#                  cero, aliased, others, respuestas)
+# cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+# data1.1 <- as.data.frame(data) %>%
+#   dplyr::select(cols_remain)
+# dim(data1.1)
+```
+
+ En la formula quito:
+  
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+  Pero le agrego un termino cuadratico a:
+  * Cuerpos de agua
+  * Recurrencia
+  * DEM
+  * VUT 
+  
+```{r}
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+
+```
+
+  Los predichos se calculan como la esperanza a posteriori de la distribucion de cada predicho.
+```{r}
+# Use 4 cores to process marginals in parallel
+library("parallel")
+options(mc.cores = 4)
+
+# Transform marginals and compute posterior mean
+#marginals: List of `marginals.fitted.values`from inla model
+tmarg <- function(marginals) {
+  post.means <- mclapply(marginals, function (marg) {
+
+  # Compute posterior mean
+  inla.emarginal(function(x) x, marg)
+  })
+
+  return(as.vector(unlist(post.means)))
+}
+```
+
+### 2.1 BESAG Impropio
+
+  Ajusto un modelo lineal sin interacciones con efectos espaciales de tipo BESAG impropio. 
+  
+```{r}
+espi_bi <- inla(
+  formula = update(
+    formula1, 
+    . ~ . + f(id_unico, model = 'besag', graph = ww)
+  ),
+  data = as.data.frame(data),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+summary(espi_bi)
+data$fit_bi <- tmarg(espi_bi$marginals.fitted.values)
+```
+
+
+### 2.2 BESAG Propio
+
+  Ajusto un modelo lineal sin interacciones con efectos espaciales de tipo BESAG propio. 
+  
+```{r}
+espi_bp <- inla(
+  formula = update(
+    formula1, 
+    . ~ . + f(id_unico, model = 'besagproper', graph = ww)
+  ),
+  data = as.data.frame(data),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+summary(espi_bp)
+data$fit_bp <- tmarg(espi_bp$marginals.fitted.values)
+```
+
+
+### 2.3 BYM
+
+```{r}
+temp <- poly2nb(data)
+nb2INLA('espi.ltt_graph', temp)
+adj_path <- paste(getwd(), '/espi.ltt_graph', sep = '')
+
+espi_bym <- inla(
+  formula = update(
+    formula1, 
+    . ~ . + f(id_unico, model = 'bym', graph = adj_path,
+              scale.model = TRUE)
+  ),
+  data = as.data.frame(data),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+summary(espi_bym)
+data$fit_bym <- tmarg(espi_bym$marginals.fitted.values)
+```
+  
+  Ahora queremos saber que proporcion de la variabilidad es explicada por el efecto espacial. Las varianzas de los efectos estructurado y no estructurado no son comparables, por lo que debemos hacer algunas cuentas. 
+
+```{r}
+n <- dim(data)[1]
+m <- 10000
+mat.marg <- matrix(NA, nrow = n, ncol = m)
+marg_all <- espi_bym$marginals.random$id_unico
+
+for (i in 1:n){
+#Remember that the first n values of the random effects
+#are u+v, while u values are stored in the (n+1) to
+#(2*n) elements.
+  u <- marg_all[[n+i]]
+  mat.marg[i, ] <- inla.rmarginal(m, u)
+}
+var_u <- apply(X = mat.marg, MARGIN = 2, FUN = var)
+
+var_v <- inla.rmarginal(
+  n = m, 
+  marginal = inla.tmarginal(
+    fun = function(x) 1/x,
+    marginal = espi_bym$marginals.hyper$`Precision for id_unico (iid component)`
+    )
+)
+perc.var <- mean(var_u / (var_u + var_v))
+perc.var
+
+```
+  
+  Sin embargo, cuando seteamos `scale.model = TRUE`, INLA hace estas cuentas por nosotros y podemos muestrear directamente de las marginales a posteriori de $\tau_u$ y $\tau_v$ usando `inla.hyperpar.sample`y calcular el cociente de varianzas. 
+  
+  `inla.hyperpar.sample` devuelve una matriz con el numero de filas igual al tamanio de la muestra, y numero de columnas igual al numero de hiperparametros.
+
+```{r}
+marg.hyper <- inla.hyperpar.sample(
+  n = 10000, 
+  result = espi_bym
+)
+head(marg.hyper)
+```
+
+  Ahora obtenemos la distribucion a posteriori de la proporcion de varianza explicada por el componente espacial:
+  
+```{r}
+perc_var <- mean(marg.hyper[, 3] / (marg.hyper[, 2] + marg.hyper[, 3]))
+perc_var
+```
+  
+  
+### 2.6 Leroux, Li y .. (generic1)
+
+```{r}
+# Calculo cantidad de vecinos en cada nodo
+nr_neigh <- sapply(adj, length)
+
+# pongo el nr. de vecinos en la diagonal
+Q <- Diagonal(x = nr_neigh)
+
+# cantidad de ubicaciones espaciales
+n <- nrow(data)
+
+# para cada ubicacion, comenzando de la 2
+for(i in 2:n){
+  # Formo una matriz diagonal en banda rodeando de -1 a cada diagonal
+  Q[i - 1, i] <- -1
+  Q[i, i - 1] <- -1
+}
+# C = I - Q
+C <- Diagonal(x = 1, n = n) - Q
+```
+
+```{r}
+espi_ler <- inla(
+  formula = update(
+    formula1, 
+    . ~ . + f(id_unico, model = 'generic1', Cmatrix = C)
+  ),
+  data = as.data.frame(data),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+summary(espi_ler)
+data$fit_ler <- tmarg(espi_ler$marginals.fitted.values)
+```
+
+### 2.5 Baseline: RE iid
+
+```{r}
+espi_iid <- inla(
+  formula = update(
+    formula1, 
+    . ~ . + f(id_unico, model = 'iid')
+  ),
+  data = as.data.frame(data),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+summary(espi_iid)
+data$fit_iid <- tmarg(espi_iid$marginals.fitted.values)
+```
+
+
+## 3. Evaluacion de modelos
+
+Primero hacemos un plot de los predichos (calculados como las medias a posteriori) y los comparamos con los datos.
+
+```{r}
+data_sp <- as(data, 'Spatial')
+# spplot(data_sp, 
+#        c('Media_ESPI.LTT', 'fit_iid', 'fit_bi', 'fit_bp',
+#                'fit_bym', 'fit_ler'))
+```
+
+
+```{r}
+qtm(data, 
+    c('fit_bym', 'fit_ler'), 
+    borders = NULL)
+```
+
+```{r}
+qtm(data, 
+    c('Media_ESPI.LTT', 'fit_iid'), 
+    borders = NULL)
+```
+
+```{r}
+qtm(data, 
+    c('fit_bi', 'fit_bp'), 
+    borders = NULL)
+```
+
+
+  Tambien podemos usar la suma de los CPO logaritmicos como una medida resumen del ajuste. Las podemos usar para comparar modelos competitivos en terminos de performance predictiva (mayor, mejor).
+  
+```{r}
+# Veamos si hay fallas
+summary(espi_iid$cpo)
+hist(espi_iid$cpo$pit)
+```
+
+```{r}
+summary(espi_bi$cpo)
+hist(espi_bi$cpo$pit)
+```
+
+```{r}
+summary(espi_bp$cpo)
+hist(espi_bp$cpo$pit)
+```
+
+```{r}
+summary(espi_bym$cpo)
+hist(espi_bym$cpo$pit)
+```
+
+```{r}
+summary(espi_ler$cpo)
+hist(espi_ler$cpo$pit)
+```
+
+```{r}
+# Calculamos el CPO logaritmico para todos los modelos
+models <- c('iid', 'besag_improper', 'besag_proper', 'bym', 'leroux')
+cpo <- c(
+  sum(log(espi_iid$cpo$cpo)),
+  sum(log(espi_bi$cpo$cpo)),
+  sum(log(espi_bp$cpo$cpo)),
+  sum(log(espi_bym$cpo$cpo)),
+  sum(log(espi_ler$cpo$cpo))  
+)
+dics <- c(
+  espi_iid$dic$dic,
+  espi_bi$dic$dic,
+  espi_bp$dic$dic,
+  espi_bym$dic$dic,
+  espi_ler$dic$dic
+)
+peff <- c(
+  espi_iid$dic$p.eff,
+  espi_bi$dic$p.eff,
+  espi_bp$dic$p.eff,
+  espi_bym$dic$p.eff,
+  espi_ler$dic$p.eff
+)
+waics <- c(
+  espi_iid$waic$waic,
+  espi_bi$waic$waic,
+  espi_bp$waic$waic,
+  espi_bym$waic$waic,
+  espi_ler$waic$waic
+)
+```
+
+  Hasta ahora, el mejor modelo es el BYM. 
+```{r}
+selection <- data.frame(cbind(models, dics, peff, waics, cpo))
+selection
+```
+  
+  Vamos a estudiar algunas otras medidas de evaluacion de la capacidad predictiva.
+  
+  Ademas, quiero saber si estoy sobreajustando.
+  
+  Luego tengo que probar estos modelos con seleccion de variables y con pca.
+
+
+## 4. Modelado con pca
+
+```{r}
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+
+```
+
+```{r}
+names(data)
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

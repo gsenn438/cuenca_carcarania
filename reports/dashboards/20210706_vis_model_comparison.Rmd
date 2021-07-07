@@ -1,0 +1,789 @@
+---
+title: "Comparación de modelos para ESPI.LTT"
+author: "Guillermina Senn"
+date: "7/6/2021"
+output: flexdashboard::flex_dashboard
+---
+
+```{r, warning=FALSE, echo=FALSE}
+library(INLA)
+
+library(sp)
+library(sf)
+library(spdep)
+
+library(parallel)
+
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(RColorBrewer) 
+
+library(rnaturalearth)
+library(DT)
+```
+
+
+Datos
+=====================================
+
+### Datos crudos
+
+```{r}
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label")
+```
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+st_geometry(data) <- data$geom
+```
+
+### Datos 'sin seleccion de variables'
+
+```{r, echo = FALSE}
+# sin seleccion
+# data_ss <- st_read(
+#   dsn = '../../data/processed/cuenca/variable_options/espi_ltt_25_no_selection.gpkg'
+# )
+# cols_delete <- c(others)
+# cols_remain <- names(data_ss)[!(names(data_ss) %in% cols_delete)]
+# data_ss <- as.data.frame(data_ss) %>%
+#  dplyr::select(cols_remain)
+# st_geometry(data_ss) <- data_ss$geom
+# head(data_ss)
+```
+
+### Datos 'PCA para todo el dataset'
+
+```{r, echo = FALSE}
+# pca todas
+# data_pca <- st_read(
+#   dsn = '../../data/processed/cuenca/variable_options/espi_ltt_25_pca_all.gpkg'
+# )
+```
+ 
+### Datos 'primeras PC (hasta 80%)'
+
+```{r, echo = FALSE}
+# pca 80% variabilidad
+# data_pca80 <- st_read(
+#   dsn = '../../data/processed/cuenca/variable_options/espi_ltt_25_pca_all_80.gpkg'
+# )
+```
+
+
+### Datos 'resultados de los modelos'
+
+```{r}
+selection <- read.csv(file = '../../models/regression/20210706_model_selection.csv')
+valid <- sf::st_read(
+  dsn = '../../models/regression/20210706_model_validation.gpkg',
+  layer = '20210706_model_validation'
+)
+```
+
+```{r}
+# print(paste('Dimensiones de los datos originales: ', dim(data_ss)))
+# print(paste('Dimensiones de los datos originales: ', dim(data_pca)))
+# print(paste('Dimensiones de los datos originales: ', dim(data_pca80)))
+```
+
+```{r}
+# Use 4 cores to process marginals in parallel
+options(mc.cores = 4)
+
+# Transform marginals (if needed) and compute posterior mean
+# marginals: List of `marginals.fitted.values`from inla model
+tmarg <- function(marginals) {
+  post.means <- mclapply(marginals, function (marg) {
+
+  # Compute posterior mean
+  inla.emarginal(function(x) x, marg)
+  })
+
+  return(as.vector(unlist(post.means)))
+}
+```
+
+```{r}
+# create color palette
+pal <- leaflet::colorBin(
+  palette = 'RdYlGn',
+  domain = data$Media_ESPI.LTT,
+  bins = seq(-1, max(data$Media_ESPI.LTT, na.rm = TRUE) + 0.1, by = 0.5)
+)
+```
+
+```{r}
+# create map labels
+valid$labels <- paste0(
+  "<strong> ESPI.LTT: </strong> ", round(valid$Media_ESPI.LTT, 3), "<br/> "
+) %>%
+  lapply(htmltools::HTML)
+```
+
+Resumen
+=====================================
+
+Column {data-width=600}
+-------------------------------------
+
+### Chart 1
+
+```{r}
+# create map labels
+data$labels <- paste0(
+  "<strong> ESPI.LTT: </strong> ", round(data$Media_ESPI.LTT, 3), "<br/> "
+) %>%
+  lapply(htmltools::HTML)
+```
+
+```{r}
+# Interactive map with leaflet
+# leaflet(data) %>%
+#   addTiles() %>%
+#   setView(lng = -63.4865, lat = -33.1814, zoom = 6.5) %>%
+#   addPolygons(
+#     fillColor = ~ pal(Media_ESPI.LTT),
+#     stroke = FALSE,
+#     color = 'grey',
+#     fillOpacity = 0.8,
+#     label = ~ labels,
+#     highlight = highlightOptions(
+#       color = 'white',
+#       bringToFront = TRUE
+#     )
+#   ) %>%
+#   leaflet::addLegend(
+#     pal = pal,
+#     values = ~ Media_ESPI.LTT,
+#     opacity = 0.5,
+#     title = 'ESPI.LTT'
+#   )
+
+```
+
+
+
+
+RLM
+=====================================
+
+Column {data-width=200}
+-------------------------------------
+
+```{r}
+# create color palette
+pal_res <- leaflet::colorBin(
+  palette = 'PuOr',
+  domain = valid$res_std_m1_pca,
+  bins = seq(
+    min(valid$res_std_m1_pca, na.rm = TRUE) - 10, 
+    max(valid$res_std_m1_pca, na.rm = TRUE) + 10,
+    by = 50
+  )
+)
+```
+
+### Mapa SS
+
+
+```{r}
+# create map labels
+valid$labels <- paste0(
+  "<strong> res_std_m1_ss: </strong> ", round(valid$res_std_m1_ss, 3), "<br/> "
+) %>%
+  lapply(htmltools::HTML)
+```
+
+```{r}
+# Interactive map with leaflet
+leaflet(valid) %>%
+  addTiles() %>%
+  setView(lng = -63.4865, lat = -33.1814, zoom = 6.5) %>%
+  addPolygons(
+    fillColor = ~ pal_res(res_std_m1_ss),
+    stroke = FALSE,
+    color = 'grey',
+    fillOpacity = 0.8,
+    label = ~ labels,
+    highlight = highlightOptions(
+      color = 'white',
+      bringToFront = TRUE
+    )
+  ) %>%
+  leaflet::addLegend(
+    pal = pal_res,
+    values = ~ res_std_m1_ss,
+    opacity = 0.5,
+    title = 'res_std_m1_ss'
+  )
+```
+
+
+### Mapa PCA
+
+```{r}
+# Interactive map with leaflet
+leaflet(valid) %>%
+  addTiles() %>%
+  setView(lng = -63.4865, lat = -33.1814, zoom = 6.5) %>%
+  addPolygons(
+    fillColor = ~ pal_res(res_std_m1_pca),
+    stroke = FALSE,
+    color = 'grey',
+    fillOpacity = 0.8,
+    label = ~ labels,
+    highlight = highlightOptions(
+      color = 'white',
+      bringToFront = TRUE
+    )
+  ) %>%
+  leaflet::addLegend(
+    pal = pal_res,
+    values = ~ res_std_m1_pca,
+    opacity = 0.5,
+    title = 'res_std_m1_pca'
+  )
+```
+
+
+### Mapa PCA80
+
+```{r}
+# Interactive map with leaflet
+leaflet(valid) %>%
+  addTiles() %>%
+  setView(lng = -63.4865, lat = -33.1814, zoom = 6.5) %>%
+  addPolygons(
+    fillColor = ~ pal_res(res_std_m1_pca_80),
+    stroke = FALSE,
+    color = 'grey',
+    fillOpacity = 0.8,
+    label = ~ labels,
+    highlight = highlightOptions(
+      color = 'white',
+      bringToFront = TRUE
+    )
+  ) %>%
+  leaflet::addLegend(
+    pal = pal_res,
+    values = ~ res_std_m1_pca_80,
+    opacity = 0.5,
+    title = 'res_std_m1_pca_80'
+  )
+```
+
+
+Column {data-width=200}
+-------------------------------------
+
+### Res. vs. pred. SS
+```{r}
+
+```
+
+### Res. vs. pred. PCA
+```{r}
+
+```
+
+### Res. vs. pred. PCA80
+```{r}
+
+```
+
+Column {data-width=200}
+-------------------------------------
+
+### Res. vs. pred. SS
+```{r}
+
+```
+
+### Res. vs. pred. PCA
+```{r}
+
+```
+
+### Res. vs. pred. PCA80
+```{r}
+
+```
+
+Column {data-width=200}
+-------------------------------------
+
+### Res. vs. pred. SS
+```{r}
+
+```
+
+### Res. vs. pred. PCA
+```{r}
+
+```
+
+### Res. vs. pred. PCA80
+```{r}
+
+```
+
+Column {data-width=200}
+-------------------------------------
+
+### Res. vs. pred. SS
+```{r}
+
+```
+
+### Res. vs. pred. PCA
+```{r}
+
+```
+
+### Res. vs. pred. PCA80
+```{r}
+
+```
+
+
+
+MLM (iid)
+=====================================
+
+Column {data-width=600}
+-------------------------------------
+### Component 1
+
+
+Column {data-width=400}
+-------------------------------------
+### Component 2
+```{r}
+
+```
+
+
+### Component 3
+```{r}
+
+```
+
+
+MLM (besag-proper)
+=====================================
+
+Column {data-width=600}
+-------------------------------------
+### Component 1
+
+
+Column {data-width=400}
+-------------------------------------
+### Component 2
+```{r}
+
+```
+
+
+### Component 3
+```{r}
+
+```
+
+
+
+MLM (bym)
+=====================================
+
+Column {data-width=600}
+-------------------------------------
+### Component 1
+
+
+Column {data-width=400}
+-------------------------------------
+### Component 2
+```{r}
+
+```
+
+### Component 3
+```{r}
+
+```
+
+
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```
+v
+
+```{r}
+
+```
+
+```{r}
+
+```

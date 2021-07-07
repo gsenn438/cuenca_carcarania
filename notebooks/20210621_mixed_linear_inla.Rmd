@@ -1,0 +1,233 @@
+---
+title: "20210517_bayesian_reg_inla"
+author: "Guillermina Senn"
+date: "5/17/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+library(INLA)
+library(brinla)
+
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(car)
+library(MASS)
+library(ranger)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(GGally)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+
+## 1. Cargar y pre-procesar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+```
+```{r}
+st_geometry(data) <- data$geom
+```
+
+```{r}
+tm_shape(data) + 
+  tm_fill('id_unico', title = 'Polygon ID', palette = 'Reds') +
+  tm_borders(col = 'white', lwd = 0.1) +
+  tm_layout('Area of study',
+          legend.title.size = 1,
+          legend.text.size = 0.6,
+          legend.position = c("left","top"),
+          legend.bg.color = "white",
+          legend.bg.alpha = 1,
+          legend.outside = TRUE,
+          frame = FALSE)
+# tmaptools::palette_explorer()
+```
+
+
+```{r}
+ndvi <- names(data)[grepl('NDVI', names(data))]
+cols_mediana <- names(data)[grepl('Mediana_', names(data))]
+cols_min <- names(data)[grepl('Minimo_', names(data))]
+cols_max <- names(data)[grepl('Maximo_', names(data))]
+cols_cv <- names(data)[grepl('CV_', names(data))]
+cero <- c('Salina_Porc', 'Plantaciones.perennes..frutales..de.secano_Porc',
+          'Plantaciones.perennes..frutales..irrigadas_Porc')
+aliased <- c('Plantaciones.forestales.maderables_Porc', 'CO_veg')
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label", 'id_unico', 'geom')
+respuestas <- c("Media_ESPI.Mean", 'Media_tCOSha', 'CO_veg')
+lpd <- names(data)[grepl('LPD', names(data))]
+```
+
+
+
+
+## 2. Modelado
+
+### 2.1 OLS: ESPI.LTT, original, poly
+
+  Solo quito:
+
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+  Pero le agrego un termino cuadratico a:
+  * Cuerpos de agua
+  * Recurrencia
+  * DEM
+  * VUT
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv, 
+                 cero, aliased, others, respuestas)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.5 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain) 
+dim(data1.5)
+```
+
+  Ajusto un modelo lineal sin interacciones.
+  
+```{r}
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+
+```
+
+```{r}
+lm1.5 <- lm(
+  formula = formula1,
+  data = data1.5,
+  na.action = na.exclude
+)
+sum1.5 <- summary(lm1.5)
+coef1.5 <- data.frame(round(sum1.5$coefficients, 6))
+coef1.5$varname <- row.names(coef1.5)
+# names(coef1.5) <- c('coef1.5', 'varname')
+coef1.5 <- coef1.5[, c(1, 2, 4, 5)]
+data1.5$res_lm1.5 <- residuals(lm1.5)
+```
+
+### 2.2 Bayesiana. Original, poly, priors default
+
+  Ajustemos una regresion bayesiana con INLA y priors por default.
+  
+  La eleccion default para los $\beta_j$ es una normal con media 0 y varianza
+  muy grande:
+  
+  $$\beta_j \sim N(0, 10^6), \quad j=0, ..., p$$
+  
+  La eleccion default de la prior para la varianza es una Gamma con precision
+  muy chica:
+  
+  $$log(\tau) \sim logGamma(1, 10^{-5})$$
+
+```{r}
+bay_inla.10 <- inla(
+  formula = formula1,
+  data = data1.5,
+  control.compute = list(dic=TRUE, cpo=TRUE)
+)
+summary(bay_inla.10)
+```
+### 2.3 Modelo lineal mixto con INLA
+
+  Usamos el modelo latente `z` para definir un termino $Zu$ en el predictor lineal, donde $Z$ es una matriz definida y $u$ un vector de RE iid con media 0 y precision $\tau C$. $C$ es conocida y se supone diagonal a menos que se indique lo contrario. El predictor lineal se escribe como:
+  
+$$\eta = X \beta + Zu$$
+  
+  $Z$ es una matriz de disenio que permite que una observacion depende de uno o mas RE. Esta matriz tendra tantas filas ocmo observaciones y tantas columnas como elementos en el vector de RE. 
+  
+  En INLA, el modelo en realidad es:
+  
+$$\eta = Zu + \varepsilon$$
+
+Se le pueden pasar los argumentos `Z` (la matriz de disenio), `Cmatrix`, que es la estructura de precision de los RE, recordemos la formula $\tau C$, y la `precision` del error $\varepsilon$. 
+
+  Como especificamos una $Z$ diagonal con unos, es equivalente a la formulacion `iid`.
+```{r}
+data1.6 <- data1.5
+data1.6$id <- 1:nrow(data1.6)
+
+
+formula1 <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_LIMO+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2) +
+  f(id, model = 'z', Z = Diagonal(nrow(data1.6), 1)))
+```  
+
+```{r}
+mix1 <- inla(
+  formula = formula1,
+  data = data1.6,
+  family = 'gaussian'
+)
+summary(mix1)
+```

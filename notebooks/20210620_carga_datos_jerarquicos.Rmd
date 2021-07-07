@@ -1,0 +1,322 @@
+---
+title: "20210620_carga_jerarquicos"
+author: "Guillermina Senn"
+date: "6/20/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(sp)
+library(tmap)
+library(sf)
+library(rgdal)
+```
+
+## 0. Resumen
+
+
+  Lista:
+  
+  1. Cobertura 2.5 (tif)
+  2. Cobertura 3 (tif)
+  
+  1. ESPI_LTT (tif)
+  2. ESPI_Mean (tif)
+  3. LPD (tif)
+  4. NDVI_LTT (tif)
+  5. NDVI_Mean (tif)
+  6. Areas protegidas (poligonos)
+  7. Cuenca Carcarania (poligono)
+
+  1. Cartas de suelo (poligonos)
+  2. Textura (pol),
+  3. Drenaje (pol)
+  4. Alcalinidad (pol)
+  5. prof_efect (pol)
+  6. Salinidad.
+  7. MO (tif)
+  8. 'ARCILLA', 'ARENA', 'CC', 'CE', 'CO',
+              'Cu', 'Fe', 'K', 'Limo', 'Mg', 'Mn', 
+              'Nt','P', 'pH', 'Zn' (tif)
+    
+  1. Recurrencia (tif) - muy grande
+  2. Recurrencia2 (tif) - muy grande
+  3. cuencas hidrograficas (pol) - fail
+  4. pmd (gpkg) - fail
+  
+  1. VUT
+
+  1. pendiente en porcentaje mde (tif) - muy grande
+  2. MDE-AR2.030mtsIGN (tif) - muy grande
+  3. modelo_digital_elevaciones_mde-ar (tif) - muy grande
+  
+## 1. Examen de los datos en capas_sig
+
+```{r}
+path <- '../data/raw/capas_sig/'
+# path <- '../data/external/data/descriptUnidadAnalisis/'
+```
+
+### 1.1 Climaticas-meteorologicas
+
+  No hay informacion en un formato utilizable, son Excel con las series temporales de lluvias, radiacion y temperatura. Posiblemente hayan sacado esta info de otro lado. 
+  
+  Jose dice que para SNIC uso: WorldClim Bio de la Universidad de California, Berkley, USA. Escala: 30 arcsec.
+
+### 1.2 Coberturas
+
+  Lista:
+  
+  1. Cobertura 2.5 (tif)
+  2. Cobertura 3 (tif)
+  
+  Son dos imagenes que estan disponibles para toda la pcia de cordoba y que contienen el tipo de cobertura de suelo a nivel de pixel. El mapa 3 contiene mas categorias. Estan a escala de pixel y no se si el resto de las variables tambien lo estaran, a la misma escala, o que.
+  
+  
+```{r}
+n25 <- readGDAL(
+  fname = paste(path, 'coberturas/Nivel25_28_dic_2018_30m.tif', sep = '')
+)
+qtm(n25)
+
+```
+
+  Coberturas mapa 3: se abren las coberturas 15-18 de 2.5 (actividades invernales/estivales/anuales/sin actividad):
+
+```{r}
+n3 <- readGDAL(
+  fname = paste(path, 'coberturas/Nivel3_28_dic_2018_30m.tif', sep = '')
+)
+qtm(n3)
+```
+
+
+#### 1.2.1 Vegetacion
+
+  Lista:
+  
+  1. ESPI_LTT (tif)
+  2. ESPI_Mean (tif)
+  3. LPD (tif)
+  4. NDVI_LTT (tif)
+  5. NDVI_Mean (tif)
+  6. Areas protegidas (poligonos)
+  7. Cuenca Carcarania (poligono)
+
+```{r}
+cc <- readOGR(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'CuencaCarcarania'
+)
+head(cc@data)
+qtm(cc)
+```
+
+```{r}
+areap <- readOGR(
+  dsn = paste(path, 'coberturas/vegetacion', sep = ''),
+  layer = 'area_protegida'
+)
+head(areap@data)
+qtm(areap)
+```
+  
+  Se tiene el ESPI para un rectangulo que es el area de estudio, pero desconozco si la resolucion es la misma que con las coberturas. 
+
+```{r}
+espi_ltt <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/ESPI_LTT_carca_WGS84_2000_2019.tif', sep = '')
+)
+qtm(espi_ltt)
+```
+```{r}
+lpd <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/LPD_carcarania.tif', sep = '')
+)
+qtm(lpd)
+```
+```{r}
+ndvi_ltt <- readGDAL(
+  fname = paste(path, 'coberturas/vegetacion/NDVI_LTT_carca_WGS84_2000_2019.tif', sep = '')
+)
+qtm(ndvi_ltt)
+```
+
+### 1.3 Edaficas-geologicas
+  
+  Lista:
+  
+  1. Cartas de suelo (poligonos)
+  2. Textura (pol),
+  3. Drenaje (pol)
+  4. Alcalinidad (pol)
+  5. prof_efect (pol)
+  6. Salinidad.
+  7. MO (tif)
+  8. 'ARCILLA', 'ARENA', 'CC', 'CE', 'CO',
+              'Cu', 'Fe', 'K', 'Limo', 'Mg', 'Mn', 
+              'Nt','P', 'pH', 'Zn' (tif)
+  
+  
+#### 1.3.1 Cartas de suelo
+
+  El recurso contiene la distribución y clasificación de las unidades de las Clases y Subclases de Capacidad de Uso de Suelo de la Provincia de Córdoba, por unidad cartográfica, según el sistema de clasificación utilizado por el Servicio de Conservación de Suelos de los Estados Unidos (SCS, USDA).
+  
+```{r}
+cartas <- st_read(
+  dsn = paste(path, 'edaficas_geologicas/Cartas_suelo', sep = ''),
+  layer = 'cartas_suelo'
+)
+
+# qtm(cartas, fill = 'ip')
+# plot(cartas['cu'])
+```
+
+```{r}
+names(cartas)
+head(cartas)
+```
+
+#### 1.3.2 Limitantes edaficas
+
+  Poligonos, para Pcia. de Cordoba, con textura, drenaje, alcalinidad, prof_efect y salinidad.
+  
+```{r}
+limit <- st_read(
+  dsn = paste(path, 'edaficas_geologicas/Limitantes_edaficas', sep = ''),
+  layer = 'limitantes_edaficasPolygon'
+)
+names(limit)
+plot(limit)
+```
+#### 1.3.3 MO
+
+```{r}
+mo <- readGDAL(
+  fname = paste(path, 'edaficas_geologicas/MO/MO_pred.tif', sep = ''),
+)
+names(mo)
+qtm(mo)
+```
+#### 1.3.4 Interpoladas
+
+  Estan interpoladas para formar un tif que no se que escala tiene. 
+  
+```{r}
+all_vars <- c('ARCILLA', 'ARENA', 'CC', 'CE', 'CO',
+              'Cu', 'Fe', 'K', 'Limo', 'Mg', 'Mn', 
+              'Nt','P', 'pH', 'Zn')
+for (var in all_vars[1]){
+  obj <- readGDAL(
+    fname = paste(path,
+                  'edaficas_geologicas/variables_interpol/',
+                  var,
+                  '.tif',
+                  sep = ''),
+  )
+  print(qtm(obj))
+}
+
+```
+
+#### 1.3.5 Otras
+
+  No se que es esto.
+```{r}
+suelos <- st_read(
+  dsn = paste(path,
+              'edaficas_geologicas/dib_soil_adsorption.kml', 
+              sep = '')
+)
+
+head(suelos)
+qtm(suelos)
+```
+
+
+### 1.4 Hidrologicas
+
+  Lista:
+  
+  1. Recurrencia (tif) - muy grande
+  2. Recurrencia2 (tif) - muy grande
+  3. cuencas hidrograficas (pol) - fail
+  4. pmd (gpkg) - fail
+  
+#### 1.4.1 Cuencas hidrograficas
+
+ 
+```{r}
+cuen <- st_read(
+  dsn = paste(path, 'edaficas_geologicas/Cartas_suelo', sep = ''),
+  layer = 'Cuencas_Hidrograficas'
+)
+qtm(cuen)
+# plot(cartas['cu'])
+```
+```{r}
+pmd <- readOGR(
+  dsn = paste(path,
+              'hidrologicas/Estaciones PMD.gpkg',
+              sep = ''),
+  layer = 'Estaciones PMD',
+  dropNULLGeometries = TRUE
+)
+head(pmd)
+qtm(pmd)
+```
+```{r}
+# rec1 <- readGDAL(
+#   fname = paste(path,
+#                 'hidrologicas/Recurrencia19842018.tif',
+#                 sep = '')
+# )
+```
+
+### 1.5 Limites
+
+### 1.6 Topograficas
+  Lista:
+  
+  1. pendiente en porcentaje mde (tif) - muy grande
+  2. MDE-AR2.030mtsIGN (tif) - muy grande
+  3. modelo_digital_elevaciones_mde-ar (tif) - muy grande
+
+```{r}
+vut <- readGDAL(
+  fname = paste(path, 
+              'topograficas/pendiente_en_porcentaje_mde-ar.tif',
+              sep = '')
+)
+names(vut)
+qtm(vut)
+```
+
+```{r}
+vut <- readGDAL(
+  fname = paste(path, 
+              'topograficas/DEM_pendiente/modelo_digital_elevaciones_mde-ar.tif',
+              sep = '')
+)
+names(vut)
+qtm(vut)
+```
+
+### 1.7 Otras
+
+  Lista: 
+  
+  1. VUT
+```{r}
+vut <- readGDAL(
+  fname = paste(path, 
+              'otras/valor_tierra_rural_2019/VUT.tiff',
+              sep = '')
+)
+names(vut)
+qtm(vut)
+```

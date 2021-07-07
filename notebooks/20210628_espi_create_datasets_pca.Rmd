@@ -1,0 +1,435 @@
+---
+title: "Untitled"
+author: "Guillermina Senn"
+date: "6/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+library(INLA)
+library(brinla)
+
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(car)
+library(MASS)
+library(ranger)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(GGally)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+```{r}
+
+names(inla.models()$prior)
+```
+## 1. Cargar los datos
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+# st_geometry(data) <- data$geom
+```
+
+## 2. Generar opciones de covariables
+
+  Variables a eliminar en todos los casos:
+```{r}
+ndvi <- names(data)[grepl('NDVI', names(data))]
+cols_mediana <- names(data)[grepl('Mediana_', names(data))]
+cols_min <- names(data)[grepl('Minimo_', names(data))]
+cols_max <- names(data)[grepl('Maximo_', names(data))]
+cols_cv <- names(data)[grepl('CV_', names(data))]
+cero <- c('Salina_Porc', 'Plantaciones.perennes..frutales..de.secano_Porc',
+          'Plantaciones.perennes..frutales..irrigadas_Porc')
+aliased <- c('Plantaciones.forestales.maderables_Porc', 'CO_veg', 'Media_LIMO')
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label", 'id_unico', 'geom')
+respuestas <- c("Media_ESPI.Mean", 'Media_tCOSha', 'CO_veg')
+lpd <- names(data)[grepl('LPD', names(data))]
+```
+
+### 2.1 Sin seleccion 
+
+ En la formula quito:
+  
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv,
+                 cero, aliased, respuestas, lpd)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.1 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain)
+dim(data1.1)
+st_geometry(data1.1) <- data1.1$geom
+```
+  Veamos la matriz de correlaciones:
+  
+```{r}
+# cor(data1.1, use = 'complete.obs')
+```
+
+  Guardo el dataset 'sin seleccion'
+  
+```{r}
+st_write(
+  obj = data1.1, 
+  dsn = '../data/processed/cuenca/variable_options/espi_ltt_25_no_selection.gpkg', 
+  layer = 'espi_25_no_selection'
+)
+```
+
+### 2.2 PCA para todas
+
+
+```{r}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/variable_options/espi_ltt_25_no_selection.gpkg'
+)
+data <- data.frame(data_raw)
+```
+
+```{r}
+cols_delete <- c(ndvi, cols_mediana, cols_min, cols_max, cols_cv,
+                 cero, aliased, others, respuestas, lpd, 'Media_ESPI.LTT')
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data1.2 <- as.data.frame(data) %>%
+  dplyr::select(cols_remain)
+dim(data1.2)
+```
+
+```{r}
+pca_all <- prcomp(
+  x = data1.2[complete.cases(data1.2), ],
+  scale = TRUE
+)
+pca_all
+```
+
+```{r}
+fviz_eig(pca_all)
+```
+
+  Componente 1: suelos arenosos con actividades estivales y bajo todo lo demas
+```{r}
+data.frame(pca_all$rotation[, 'PC1']) %>%
+  arrange(desc(abs(pca_all.rotation....PC1..)))
+```
+  Componente 2: suelos en el valle con actividades doble ciclo, hierro, fosforo, potasio, arcilla, zonas anegables, ...
+```{r}
+data.frame(pca_all$rotation[, 'PC2']) %>%
+  arrange(desc(abs(pca_all.rotation....PC2..)))
+```
+
+  Componente 3: alto vut, actividades estivales, zonas urbanas, no inundables, lo menos natural posible...
+```{r}
+data.frame(pca_all$rotation[, 'PC3']) %>%
+  arrange(desc(abs(pca_all.rotation....PC3..)))
+```
+  Rotamos los datos:
+  
+```{r}
+X <- as.matrix(data1.2)
+dim(X)
+P <- as.matrix(pca_all$rotation)
+dim(P)
+X_rot <- X %*% P
+dim(X_rot)
+```
+```{r}
+data1.2_rot <- data.frame(X_rot)
+data1.2_rot
+```
+  Agregamos las columnas de geometria y la respuesta, y guardamos.
+  
+```{r}
+data1.2_rot$geom <- data$geom
+data1.2_rot$Media_ESPI.LTT <- data$Media_ESPI.LTT
+data1.2_rot$id_unico <- data$id_unico
+data1.2_rot
+st_geometry(data1.2_rot) <- data1.2_rot$geom
+```
+
+```{r}
+qtm(data1.2_rot, fill = 'PC1', borders = NULL)
+```
+```{r}
+st_write(
+  obj = data1.2_rot, 
+  dsn = '../data/processed/cuenca/variable_options/espi_ltt_25_pca_all.gpkg', 
+  layer = 'espi_ltt_25_pca_all'
+)
+```
+
+  Guardo el objeto PCA.
+  
+```{r}
+write.csv(
+  x = unclass(loadings(pca_all))[,(pca_all$sdev^2 > 1),drop = FALSE], 
+  file = '../data/processed/cuenca/variable_options/espi_ltt_25_pca_all.csv'
+)
+```
+
+### 2.3 Dataset con los primeros componentes PCA
+
+
+```{r}
+data1.3 <- data1.2_rot
+data1.3
+```
+  Al 80% de variabilidad lo capto con las primeras 15 componentes.
+```{r}
+cbind(1:length(pca_all$sdev),100*pca_all$sdev^2/sum(pca_all$sdev^2) , cumsum(100*pca_all$sdev^2/sum(pca_all$sdev^2)))
+```
+
+
+```{r}
+data1.3 <- data1.3[, c(names(data1.3)[1:15], names(data1.3)[43:45])]
+data1.3
+```
+```{r}
+st_write(
+  obj = data1.3, 
+  dsn = '../data/processed/cuenca/variable_options/espi_ltt_25_pca_all_80.gpkg', 
+  layer = 'espi_ltt_25_pca_all_80'
+)
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

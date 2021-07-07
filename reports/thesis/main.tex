@@ -1,0 +1,385 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage[a4paper, 12pt]{geometry}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{1em}
+\renewcommand{\baselinestretch}{1.5}
+
+\usepackage{graphicx}
+\graphicspath{ {./images/} }
+
+\usepackage{bm}
+\usepackage{amsmath}
+
+\begin{document}
+
+% title page
+\begin{titlepage}
+    \begin{center}
+        \vspace*{1cm}
+        \LARGE
+        Impacto de la colinealidad en modelos de regresión lineal Bayesiana con INLA para datos espaciales. Una aplicación a la degradación del suelo.      
+        
+        \vspace*{1.5cm}  
+        \normalsize
+        Tesista: Guillermina Senn
+        
+        Directora: Monica Balzarini
+        
+        Co-director: Raúl Macchiavelli
+    
+       \vfill
+            
+       Proyecto de tesis para optar al grado de \\
+       Magister en Estadistica Aplicada.
+       
+       \vspace*{0.8cm}           
+       Departamento de Estadistica\\
+       Universidad Nacional de Cordoba\\
+       Argentina\\
+       Junio 2021
+
+    \end{center}
+\end{titlepage}
+
+
+% introduction
+\section{Introducción}
+
+En en marco de una operación conjunta entre la Universidad Nacional de Córdoba, CONICET y la CEEA Regional Córdoba se construyó un GIS entre los años 2020 y 2021 con gran cantidad de datos del territorio conocido como Cuenca del Carcarañá.  
+
+
+En la actualidad, la generación masiva de datos geoposicionados o espaciales, revolucionada por el uso de sensores remotos y/o proximales, produce año tras año mayores oportunidades de aprendizaje y acción de base cuantitativa (Plant, 2012; Cressie y Wikle, 2015). 
+
+El sistema hidrologico del Carcarañá es un área geográfica de unos X km2 de extensión, situada dentro de los límites jurisdiccionales de la Provincia de Córdoba. Con la disponibilidad de gran cantidad de información geo-referenciada sobre el territorio de la cuenca, obtenida mayoritariamente de imágenes por sensado remoto, aparece la posibilidad de relacionar variables socio-ambientales a escala de paisaje. 
+
+En las últimas dos décadas la producción anual de los cultivos extensivos en Argentina se ha incrementado notablemente. Los cultivos para granos juegan un rol importante en los sistemas de producción y se proyectan incrementos en el área sembrada mayores al 10 por ciento para 2025 (FAOSTAT, 2018). La principal actividad productiva de la región de la cuenca del Carcarañá es la agrícola-ganadera, con agricultura de secano. 
+
+El cambio climático, la extensión de las coberturas antrópicas y la consecuente disminución de las coberturas naturales en una región que provee servicios ecosistémicos a una población de X habitantes justifica nuestro interés en generar modelos predictivos con potencial de predecir riesgos emergentes en la Cuenca del Carcarañá en relación con la degradación de recursos naturales y la producción agropecuaria. 
+
+Dentro de los datos disponibles, algunas de las variables constituirán salidas del sistema y otras serán variables de entrada o explicativas, que podrían darnos información sobre la variabilidad en las salidas. Al estar geo-referenciadas, estas variables de entrada tienen una parte de variabilidad propia y otra causada por la dependencia espacial entre observaciones.
+
+El modelo frecuentista de regresión es una herramienta clásica para relacionar estas variables de entrada, que llamaremos regresoras, con las variables de salida, que llamaremos respuestas. Sin embargo, nuestros datos proponen  desafíos adicionales que hacen que este modelo de regresión clásico pueda no ser apropiado: (1) las observaciones no son independientes porque existe una estructura de dependencia espacial y (2) gran parte de nuestras regresoras muestra cross-correlación espacial.  
+
+
+
+el análisis de regresión está diseñado para situaciones donde se piensa que una variable está relacionada a una o más mediciones hechas sobre el mismo objeto (Searle, ..).
+
+En la inferencia bayesiana, consideramos que la incertidumbre de una variable aleatoria respuesta se modela usando una distribución de probabilidad indexada por un vector de parámetros, llamada función de verosimilitud. (Blangiardo & Cameletti, 2015) En contraste con el enfoque frecuentista, los parámetros son variables aleatorias cuya distribución podemos especificar antes de ver los datos. La inferencia Bayesiana hace uso del teorema de Bayes para combinar la verosimilitud de los datos con las distribuciones a priori de los parámetros y generar distribuciones a posteriori de los parámetros que son compromisos entre las distribuciones a priori y la verosimilitud. Las conclusiones estadísticas sobre un parámetro se hacen en términos de afirmaciones probabilísticas y son condicionales a los datos.  (Moraga, 2019) 
+
+
+Los efectos de la colinealidad en la regresión lineal clásica son conocidos y consisten en (1) la sobre-estimación del error estándar de los coeficientes de regresión, que deriva en disminucion de la potencia en los tests de significancia del coeficiente y por lo tanto en un aumento del error de Tipo II (CITA), y (2) impredecibilidad en la magnitud de los coeficientes de regresión del resto de las variables altamente colineales con ella, al incluir o quitar una variable del modelo. (CITA) 
+
+A la vez, la regresión lineal clásica por OLS asume residuos homocedásticos y no correlacionados. El modelado de datos espaciales podría generar residuos no correlacionados, en el caso de que las regresoras incluidas en el modelo puedan explicar toda la variabilidad espacial en la respuesta, y que en la respuesta no se encuentren motivos intrínsecos que generen autocorrelación espacial (CITA). La situación anterior no es común en la práctica, lo que implica que frecuentemente OLS no es la herramienta adecuada para modelar datos espaciales, ya que la violación del supuesto de independencia afecta negativamente la inferencia estadística y la capacidad predictiva. 
+
+No reconocer la presencia de correlación positiva en los datos genera intervalos de confianza (para los parámetros) demasiado angostos y por lo tanto un aumento en el error Tipo I (Cressie, 1993; Beale et al, 2010). Definiendo el numero equivalente de observaciones independientes $n'$ como una funcion $f(n, rho)$, donde $rho$ es el coeficiente de correlacion, resulta que $n$ datos correlacionados logran aproximadamente la misma precisión que $n'$ datos independientes. (Cressie, 1993) Desde el punto de vista predictivo, cuando las correlaciones espaciales decaen geometricamente con la distancia, los intervalos de prediccion clasicos son, frecuentemente, aproximadamente validos, pero podrian ser altamente ineficientes. (Cressie, 1993)
+
+Una de las soluciones para realizar regresión lineal con datos correlacionados espacialmente consiste en incorporar la espacialidad en el término de error. Esto se logra especificando una matriz de varianzas y covarianzas dada por un modelo que indica cómo cambia la dependencia espacial con la distancia entre observaciones. Esta relación se suele describir de manera simplificada, parametrizándola con una estructura de vecindarios y una función de correlación. Los modelos usuales de correlación son el modelo exponencial, el modelo esférico y el modelo Gaussiano. Los modelos autorregresivos SAR y CAR son ejemplos de modelos que incorporan la espacialidad en el término de error. Los modelos SAR pueden estimarse por GLS, mientras que los CAR son estimados con REML. 
+
+Otra forma de administrar la espacialidad es plantear el problema como un modelo de regresión lineal Bayesiano jerárquico. El enfoque Bayesiano para la regresión lineal no es un desarrollo teórico nuevo. Sin embargo, su implementación se vio restringida por el alto costo computacional que implicaba el cálculo de las distribuciones a posteriori. Hoy en día se cuenta con suficiente poder de cómputo como para que las estimaciones, históricamente realizadas con algoritmos de MCMC, sean factibles de hacer incluso con una computadora personal, lo que ha generado una explosión en la popularidad de los métodos Bayesianos. Adicionalmente, el método INLA (2009) para estimación de modelos Bayesianos ha permitido generar resultados con exactitud comparable a MCMC en tiempos mucho menores (CITA).
+
+En la actualidad, estos modelos de regresión Bayesiana se usan para aportar a la escala de paisaje. 
+
+
+Mencionar cross'corr con espacial.
+(highly cross-correlated spatial variables cause imprecise parameter estimates in spatial regression: see Supporting
+Information).
+
+
+El objetivo general. 
+
+El objetivo general de este proyecto de tesis de maestría es
+comparar el desempeño predictivo de los modelos Bayesianos frente a los modelos de regresión frecuentista en escenarios que involucran estructura espacial en la respuesta y las covariables, y cross-correlación espacial entre covariables.
+
+El propósito de este proyecto de tesis es construir conocimiento para la gestión ambiental de la región de la cuenca del Carcarañá a través del desarrollo de modelos estadísticos predictivos, al mismo tiempo que se investigan cuestiones metodológicas estadísticas propias de los modelos. 
+
+Los objetivos específicos:
+
+\begin{enumerate}
+
+  \item Identificar técnicas para la selección de variables en presencia de colinealidad, para modelos de regresión frecuentistas y Bayesianos.
+
+  \item Comparar la capacidad predictiva de modelos de regresión frecuentista clásica OLS y modelos de regresión Bayesiana, sin considerar espacialidad, con distintas opciones de selección de variables.
+  
+  \item Comparar la capacidad predictiva entre modelos de regresión Bayesiana con y sin efectos espaciales, con distintas opciones de selección de variables. 
+  
+  \item Identificar el mejor modelo predictivo. 
+  
+  \item Identificar las covariables con mayor capacidad predictiva.
+  
+\end{enumerate}
+
+Las hipótesis que sustentan esta propuesta son:
+
+\begin{enumerate}
+
+  \item La presencia de colinealidad y correlación cruzada en variables espaciales afecta negativamente la capacidad predictiva de los modelos. 
+  
+  \item Los modelos predictivos a partir de datos espaciales que consideran la presencia de estructuras de dependencia espacial subyacente aumentan la eficacia estadística respecto a versiones análogas que tratan los datos como independientes.
+  
+  \item Los modelos predictivos confiables para datos ambientales a escala de paisaje pueden ser una herramienta valiosa para los tomadores de decisiones que busquen comparar escenarios que afecten los índices de servicios ecosistémicos.  
+  
+\end{enumerate}
+
+
+
+
+% bayesiano
+\newpage
+\section{Enfoque Bayesiano}
+
+
+% inferencia
+\subsection{Inferencia Bayesiana}
+
+En la inferencia bayesiana, consideramos que la incertidumbre de una variable aleatoria respuesta se modela usando una distribución de probabilidad $L$ indexada por un vector de parámetros $\theta$, llamada función de verosimilitud. (Blangiardo and Cameletti, 2015) 
+
+\begin{equation} \label{1}
+    L(\theta) = p(Y=y|\theta) = p(y|\theta)
+\end{equation}
+
+
+En contraste con el enfoque frecuentista, los parámetros $\theta$ son variables aleatorias cuya distribución $p(\theta)$ debemos especificar a priori, es decir, antes de ver los datos. (Blangiardo and Cameletti, 2015) 
+
+La inferencia Bayesiana hace uso del teorema de Bayes para combinar la verosimilitud $L(\theta)$ de los datos con las distribuciones a priori $p(\theta)$ de los parámetros y generar distribuciones a posteriori $p(\theta|y)$ de los parámetros que son compromisos entre las distribuciones a priori y la verosimilitud. 
+
+\begin{equation} \label{2}
+    p(\theta|y) = \frac{p(y|\theta)p(\theta)}{\sum_{i=1}^{K}{p(y|\theta)p(\theta)}}
+\end{equation}
+
+La distribución a posteriori de los parámetros representa la incertidumbre sobre el parámetro de interés luego de observar los datos. (Blangiardo and Cameletti, 2015) 
+
+El denominador en la ecuación (\ref{2}) es una distribución marginal que se calcula integrando la verosimilitud respecto a $\theta$. 
+
+\begin{equation} \label{3}
+    p(y) = \int_{\theta \in \Theta}{p(y|\theta)p(\theta)d\theta}
+\end{equation}
+
+Como la integración elimina la dependencia respecto a $\theta$, $p(y)$ es una constante de normalización. 
+En la práctica, la distribución a posteriori se estima sin computar la verosimilitud marginal. Por lo tanto, el teorema de Bayes se suele plantear como
+
+\begin{equation} \label{4}
+    \p(\theta | y) \propto p(y|\theta)p(\theta)
+\end{equation}
+
+Esto significa que la distribución a posteriori se puede estimar re-escalando el producto de la verosimilitud y la distribución a priori de manera que integre a 1. (Gómez-Rubio, 2020)
+
+Una gran ventaja de trabajar con el enfoque Bayesiano es que se obtiene una distribución de probabilidad para los parámetros de interés que permite que las conclusiones estadísticas sobre ellos se hagan en términos de afirmaciones probabilísticas.  (Blangiardo y Cameletti, 2015; Moraga, 2019)  
+
+Por ejemplo, uno de los artefactos más usados en la inferencia Bayesiana es el intervalo de credibilidad (CI, del inglés Credible Interval). El CI se define como el par de valores $(\theta_{0.25}, \theta_{0.975})$ que cumplen 
+
+\begin{equation} \label{5}
+    p(\theta \le \theta_{0.025}|y) = 0.025 \quad y \quad p(\theta \ge \theta_{0.975}|y) = 0.025
+\end{equation}
+
+y se interpreta directamente como la probabilidad (a posteriori) de que $\theta$ caiga dentro del CI
+(Blangiardo & Cameletti, 2015). Si se quiere, también se pueden caracterizar los parámetros utilizando estadísticos resumen de su distribución a posteriori.
+
+El teorema de Bayes usado en el contexto de la inferencia Bayesiana puede ser controversial, porque las distribuciones a priori son elegidas subjetivamente pero pueden  tener un fuerte impacto en las distribuciones a posteriori (Blangiardo & Cameletti, 2015).
+
+
+Resulta entonces que la elección de las distribuciones a priori es vital. Hay dos aspectos de ellas a tener en cuenta: (i) el tipo de distribución, que dependerá de la naturaleza del parámetro, y (ii) los hiperparámetros, que manejan el nivel de información que se tiene para los parámetros (Blangiardo & Cameletti, 2015).
+ 
+Las priors no informativas son atrayentes para investigadores que no tienen información sobre los parámetros en estudio y quieren dejar que los datos hablen por sí mismos. En este caso, la prior debe asignar igual densidad a todos los posibles valores del parámetro. Un ejemplo de de prior no informativa es la de Jeffrey, que es una función de la verosimilitud, y por tanto invariante a transformaciones. Otro ejemplo es la de Bernardo, llamada prior de referencia, que maximiza la distancia KL entre prior y posteriori, y coincide con la de Jeffrey en muchos casos. Ambas son ejemplos de priors impropias, lo que significa que no son distribuciones de probabilidad. Si la posteriori es propia, esto no es un problema, pero en algunos casos una prior impropia genera una posteriori también impropia. 
+
+Otra estrategia es usar una prior vaga, que es una prior que es no informativa en un subconjunto de los parámetros donde la verosimilitud no es cero. Por ejemplo, una normal con media 0 y varianza muy grande se podría utilizar como una prior vaga para una media o un parámetro de regresión. 
+
+Las priors informativas suelen surgir del resultado de experimentos propios o de opiniones de expertos. Como ejemplo, si queremos saber el efecto de una droga y ya sabemos que hubo experimentos con drogas parecidas, podemos usar los valores obtenidos en estos experimentos para formar un rango probable para el parámetro. 
+
+
+% computo
+\subsection{Cómputo Bayesiano}
+
+Las distribuciones a priori pueden elegirse de tal manera que la distribución a posteriori esté disponible de forma cerrada. Cuando este es el caso, se dice que se usan distribuciones a priori \textit{conjugadas}. Los modelos con distribuciones a priori conjugadas son aquellos donde la distribución a priori tiene la misma forma que la verosimilitud (Gómez-Rubio, 2020). En la gran mayoría de los modelos no es este el caso. 
+
+Cuando no se pueden usar distribuciones a priori conjugadas, no es posible manipular la distribución a posteriori analíticamente y tenemos que explorarla mediante métodos de simulación. 
+
+En general, los métodos computacionales intentan estimar las integrales que aparecen en la inferencia Bayesiana (Gómez-Rubio, 2020).
+
+Los métodos de cadena de Markov - Monte Carlo (MCMC, del inglés Markov chain Monte Carlo) son métodos computacionales (probabilísticos?) para generar muestras de la distribución \textbf{conjunta} a posteriori (Gómez-Rubio, 2020). Para ello se construye una cadena de Markov cuya distribución estacionaria sea igual a la distribución a posteriori que se intenta samplear. Si la cadena de Markov cumple ciertas propiedades, las muestras obtenidas después de cierto número de iteraciones de la cadena serán muestras provenientes de la distribución a posteriori. Para construir estas cadenas hay dos algoritmos muy conocidos: Metropolis-Hastings (CITA) y muestreo de Gibbs (CITA). 
+
+Los métodos MCMC datan de los años XX (CITA) pero no fue hasta los años XX (CITA) que su uso se difundió extensivamente, con el advenimiento de mayor poder de cómputo. Estos métodos producen resultados exactos pero son lentos (CITA) porque deben computar la distribución a posteriori conjunta de los parámetros, que está en un espacio de altas dimensiones (Gómez-Rubio, 2020). Por lo tanto, el cálculo de la inferencia Bayesiana se vio propulsado por la aparición de INLA (Rue et al., 2009), mucho más rápido computacionalmente que MCMC. 
+
+INLA, del inglés \textit{Integrated nested Laplace approximation}, o \textit{Aproximación de Laplace integrada anidada}, es un método computacional para realizar inferencia Bayesiana sobre modelos Gaussianos latentes. Como estos LGM (del inglés \textit{Latent Gaussian Models}) se construyen con un campo aleatorio Gaussiano de Markov (GMRF, del ingles \textit{Gaussian-Markov random field}, su  matriz de precisión es dispersa. INLA aprovecha esta cualidad y combina métodos numéricos para matrices dispersas, que son muy eficientes, con aproximaciones de Laplace, para estimar las distribuciones \textbf{marginales} a posteriori de los parámetros. El método resulta mucho mas rápido que MCMC y, muchas veces, mas preciso.  
+
+
+% INLA
+\subsection{INLA}
+
+Para utilizar INLA se debe plantear el modelo como un modelo Gaussiano latente en el marco Bayesiano. En la practica esto no es una limitación porque los LGMs incluyen a muchos de los modelos más usados, desde los modelos lineales generalizados a los modelos espaciales o espacio-temporales complejos. 
+
+A continuacion se plantea un modelo con predictor lineal aditivo y se muestra como puede ser llevado a la especificacion de los LGMs. 
+
+%En primer lugar se necesita definir la distribución de las observaciones. 
+Dado un vector de observaciones $\textbf{y} = (y_1, ..., y_n)$, el enfoque general consiste en caracterizar su distribución con la media $E[y_i] = \mu_i$. La media $\mu_i$ es una función de un predictor lineal aditivo $\eta_i$ y esta relación se indica con la función de enlace $g(.)$.
+
+\begin{equation} \label{6}
+    \eta_i = g(\mu_i)
+\end{equation} 
+
+El predictor lineal $\eta_i$ es aditivo y tiene la forma de la ecuacion (\ref{7}).
+
+\begin{equation} \label{7}
+    \eta_i = \alpha + \sum_{j=1}^{n_\beta}{\beta_j z_{ji}} + \sum_{k=1}^{n_f}{f^{(k)}(u_{ki})} + \varepsilon_i; \quad i=1, ..., n
+\end{equation}
+
+En el predictor lineal se incluyen el error aleatorio $\varepsilon_i$, los efectos fijos $\beta_j$ y los efectos especiales $f(.)$ normales que vienen de alguna matriz de covarianzas parametrizada por $\bm{\theta}$. En los efectos especiales se pueden modelar relaciones no lineales, tendencias temporales, efectos aleatorios y efectos espaciales, entre otros. 
+
+Asumiendo independencia condicional y que cada observación $y_i$ solo se corresponde con un predictor lineal $\eta_i$, el modelo se conecta con los datos $\bm{y}$ mediante la siguiente función de verosimilitud, no necesariamente de la familia exponencial:
+
+\begin{equation} \label{8}
+    \bm{y} \sim p(\bm{y} | \bm{\eta}, \bm{\theta}) = \prod_i{p( y_i | \eta_i, \bm{\theta})}
+\end{equation}
+
+En el marco Bayesiano también existen hiperparámetros $\bm{\theta}$ para controlar los efectos. Estos hiperparámetros generalmente serán los parámetros de la matriz de covarianzas de los efectos especiales y no tendrán necesariamente distribuciones Gaussianas. 
+
+Si las distribuciones a priori son Gaussianas y el predictor lineal es aditivo, la combinación de los componentes del modelo genera una estructura $\bm{x}$ con distribución condicional Gaussiana como la planteada en la ecuación (\ref{9}). Resulta que $\bm{x}$ contendrá a todos los componentes del modelo excepto a los hiperparámetros $\bm{\theta}$.
+
+\begin{equation} \label{9}
+    \bm{x} = (\alpha, \bm{\beta}, \bm{f}, \bm{\eta})
+\end{equation}
+
+El modelo especificado anteriormente en términos de su verosimilitud $\bm{y}$, sus hiperparámetros $\bm{\theta}$ y la estructura $\bm{x}$ se puede plantear dentro de un marco mas general, el de los modelos Gaussianos latentes. 
+
+Un modelo Gaussiano latente se define en tres etapas. En primer lugar se define el vector de hiperparámetros $\bm{\theta}$:
+
+\begin{equation} \label{10}
+    \bm{\theta} \sim p(\bm{\theta})
+\end{equation}
+
+Luego se define el campo latente $\bm{x}$, no observado, que al condicionarlo respecto a los hiperparámetros $\bm{\theta}$ se distribuye normal multivariado:
+
+\begin{equation} \label{11}
+    \bm{x} | \bm{\theta} \sim p( \bm{x} | \bm{\theta}) = N(\bm{\mu}, \Sigma(\bm{\theta}))
+\end{equation}
+
+Finalmente se define la distribución de los datos $\bm{y}$, donde algunos de los $x_i$ han sido observados, y donde los datos se asumen condicionalmente independientes respecto al campo latente y a los hiperparámetros:
+
+\begin{equation} \label{12}
+    \bm{y} | \bm{x}, \bm{\theta} \sim p(\bm{y} | \bm{x}, \bm{\theta}) = \prod_i{p( y_i | \eta_i, \bm{\theta})}
+\end{equation}
+
+Los modelos latentes Gaussianos que INLA resuelve deben satisfacer dos propiedades básicas. 
+
+En primer lugar, se asume que el campo latente $\bm{x}$ es un GMRF con matriz de precisión dispersa $\bm{Q}(\bm{\theta})$. Según Rue and Held (2005), un vector aleatorio $\bm{x}$ es un GMRF respecto a un grafo $G = (V, E)$ con media $\bm{\mu}$ y matriz de precisión $\bm{Q}$ simétrica semidefinida positiva si y solo si tiene densidad normal multivariada y  
+
+\begin{equation} \label{13}
+    Q_{ij} \ne 0 \iff \{i, j\} \in E \quad for \; all \quad i \ne j, 
+\end{equation}
+
+donde $E$ es el conjunto de aristas entre nodos. 
+
+Esta definición implica que el campo aleatorio cumple con la propiedad de Markov; es decir, que si dos nodos del grafo (o dos observaciones) no están conectados directamente (no son vecinas), son independientes. Por lo tanto, cuantas menos conexiones haya entre nodos, mas dispersa sera la matriz $\bm{Q}$, y mayor eficiencia computacional se obtendrá al poder realizar operaciones para matrices dispersas. 
+
+En segundo lugar, el numero $m$ de hiperparámetros debe ser pequeño, alrededor de $m \le 6$, para que la inferencia sea rápida computacionalmente. Por el contrario, $dim(\bm{x})$ puede estar en el orden de los cientos o cientos de miles. 
+
+El objetivo de INLA es resolver dos tareas: 
+
+\begin{enumerate}
+    \item Encontrar la distribución marginal a posteriori de cada elemento del vector de hiperparámetros:
+    
+    \begin{equation} \label{14}
+        p( \theta_j| \bm{y}) = \int{p(\bm{\theta} | \bm{y}) d\bm{\theta}_{-j}}  
+    \end{equation}
+    
+    \item Encontrar la distribución marginal a posteriori de cada elemento del campo latente:
+    
+    \begin{equation} \label{15}
+    p(x_i | \bm{y}) = \int{p(x_i, \bm{\theta} | \bm{y}) d \bm{\theta}} = \int{p(x_i | \bm{\theta} , \bm{y}) p( \bm{\theta} | \bm{y}) d \bm{\theta}}
+    \end{equation}
+\end{enumerate}
+
+Para resolver 1. se aproxima la distribución conjunta a posteriori de los hiperparámetros $p(\bm{\theta} | \bm{y})$ y luego se integra para obtener las marginales (CITA). 
+
+Para resolver 2. se necesita el resultado de 1. y la aproximación de la distribución condicional a posteriori de cada elemento del campo latente, $p(x_i | \bm{\theta}, \bm{y})$.
+
+A continuación se muestra como encontrar una aproximación de la distribución a posteriori conjunta del vector de hiperparámetros. 
+
+\begin{equation} \label{16}
+    \begin{split}
+    p(\bm{\theta} | \bm{y}) & = p(\bm{\theta}, \bm{x} | \bm{y}) \cdot \frac{1}{p(\bm{x} | \bm{\theta}, \bm{y})} \\
+    & = \frac{p(\bm{\theta}, \bm{x} , \bm{y})}{p(\bm{y})} \cdot \frac{1}{p(\bm{x} | \bm{\theta}, \bm{y})} \\
+    & = \frac{p(\bm{y} | \bm{x}, \bm{\theta}) p(\bm{x} | \bm{\theta}) p(\bm{\theta)}}{p(\bm{y})} \cdot \frac{1}{p(\bm{x} | \bm{\theta}, \bm{y})} \\
+    & \propto \frac{p(\bm{y} | \bm{x}, \bm{\theta}) p(\bm{x} | \bm{\theta}) p(\bm{\theta)}}{p(\bm{x} | \bm{\theta}, \bm{y})} 
+    \end{split}
+\end{equation}    
+    
+El denominador es la distribución del campo latente condicional a los datos y los hiperparámetros. Como la distribución a priori es un GMRF, es correcto aproximar la distribución a posteriori del campo latente con una distribución con una aproximación Gaussiana dada por la aproximación de Laplace, $\tilde{p}(\bm{x} | \bm{\theta}, \bm{y})$. 
+
+\begin{equation} \label{17}
+    \begin{split}    
+    p(\bm{\theta} | \bm{y}) & \approx \frac{p(\bm{y} | \bm{x}, \bm{\theta}) p(\bm{x} | \bm{\theta}) p(\bm{\theta)}}{\tilde{p}(\bm{x} | \bm{\theta}, \bm{y})}\bigg\rvert_{\bm{x} = \bm{x} ^ * (\bm{\theta})} =: \tilde{p}(\bm{\theta} | \bm{y})
+    \end{split}
+\end{equation}
+
+Reemplazando el denominador por su versión aproximada y evaluando la expresión completa en la moda del campo latente para un determinado valor del vector de hiperparámetros, se obtiene la distribución a posteriori aproximada del vector de hiperparámetros $\tilde{p}(\bm{\theta} | \bm{y})$. 
+
+Para resolver 2. adicionalmente hace falta la distribución condicional a posteriori del elemento del campo latente que se desea, $p(x_i | \bm{\theta} , \bm{y})$. Encontrar la distribución para cada $x_i$ a partir de la conjunta de $\bm{x}$ es mas complejo que en 1., porque la dimensión de $\bm{x}$ podría rondar los cientos o miles. Rue \textit{et al.} (2009) plantean tres formas para encontrar los $p(x_i | \bm{\theta} , \bm{y})$: una aproximación Gaussiana, una aproximación de Laplace, y una aproximación simplificada de Laplace. La aproximación Gaussiana no se recomienda porque aunque es rápida, no produce buenos resultados. La aproximación de Laplace se describe a continuación.
+
+Reescribiendo a $\bm{x}$ como $\bm{x} = (x_i, \bm{x}_{-i})$:
+
+\begin{equation} \label{18}
+    \begin{split}
+    p(x_i | \bm{\theta}, \bm{y}) & = \frac{p((x_i, \bm{x}_{-i}) | \bm{\theta}, \bm{y})}{p(\bm{x}_{-i} | x_i, \bm{\theta}, \bm{y})} \\
+    & = \frac{p(\bm{x}, \bm{\theta} | \bm{y})}{p(\bm{\theta} | \bm{y})} \cdot \frac{1}{p(\bm{x}_{-i} | x_i, \bm{\theta}, \bm{y})} \\
+    & \propto p(\bm{x}, \bm{\theta} | \bm{y}) \cdot \frac{1}{p(\bm{x}_{-i} | x_i, \bm{\theta}, \bm{y})} 
+    \end{split}
+\end{equation}  
+
+Ahora se puede hacer una aproximación de Laplace sobre el denominador porque $\bm{x}_{-i} | x_i, \bm{\theta}, \bm{y})$ son generalmente variables aleatorias normales. La expresión completa se evalúa luego en la moda $\bm{x}_{-i} ^* _{(x_i, \bm{\theta})}$ y se obtiene finalmente la expresión aproximada para $p(x_i | \bm{\theta}, \bm{y})$.
+
+\begin{equation} \label{19}
+    \begin{split}
+       p(x_i | \bm{\theta}, \bm{y}) & \propto p(\bm{x}, \bm{\theta} | \bm{y}) \cdot \frac{1}{\tilde{p}(\bm{x}_{-i} | x_i, \bm{\theta}, \bm{y})} \bigg\rvert_{\bm{x}_{-i} = \bm{x}_{-i} ^* _{(x_i, \bm{\theta})}}  =: \tilde{p}(x_i | \bm{\theta}, \bm{y})
+    \end{split}
+\end{equation}
+
+
+Esta aproximación de Laplace es costosa computacionalmente porque requiere re-computar $\tilde{p}(\bm{x}_{-i} | x_i, \bm{\theta}, \bm{y})$ para cada combinación de valores de $\bm{x}$ y  $\bm{\theta}$. 
+
+La aproximación simplificada de Laplace es mas rápida y suele tener buenos resultados y por ello es la opción por default en la librería R-INLA. La aproximación simplificada de Laplace esta basada en una expansión de Taylor de $\tilde{p}(x_i | \bm{\theta}, \bm{y})$ combinado con un termino que corrige la ubicación y el sesgo de la distribución, tal como un \textit{spline}. 
+
+Cuando ya se tienen las aproximaciones $\tilde{p}(x_i | \bm{\theta}, \bm{y})$ y $\tilde{p}(\bm{\theta} | \bm{y})$ se pueden obtener finalmente mediante integración las distribuciones marginales a posteriori para cada elemento del campo latente y del vector de hiperparámetros (CITA). En ambos casos es necesario elegir puntos de integración relevantes $\{ \bm{\theta}_k^{(j)} \}$. 
+
+Los puntos de integración se encuentran explorando el logaritmo de la distribución aproximada a posteriori de los hiperparámetros $log\{\tilde{p}(\bm{\theta} | \bm{y})\}$. Antes de comenzar a explorar la distribución de los hiperparámetros se reparametriza el espacio de los hiperparámetros para corregir la escala y la rotación y simplificar la integración numérica (Rue \textit{et al.}, 2009).
+
+Hay dos estrategias para explorar $log\{\tilde{p}(\bm{\theta} | \bm{y})\}$. La estrategia de grilla construye una grilla de puntos asociada con el grueso de la masa de $\tilde{p}(\bm{\theta} | \bm{y})$. Es posible usarla cuando se tienen como máximo cuatro hiperparámetros. Cuando el número de hiperparámetros es mayor a cuatro, se recomienda usar la estrategia de diseño compuesto central o CCD, del ingles \textit{Central Composite Design}. Con CCD se eligen algunos puntos relevantes del espacio de $\bm{\theta}$, que en general son muchos menos puntos que los necesarios con la estrategia de grilla (Blangiardo y Cameletti, 2015). CCD acelera los cómputos manteniendo resultados casi equivalentes a los obtenidos con la estrategia de grilla y por lo tanto es la opción por default en R-INLA (Rue \textit{et al.}, 2009). 
+
+Teniendo los puntos de integración $\{ \bm{\theta}_k^{(j)} \}$ es posible computar las marginales a posteriori deseadas. 
+
+Las marginales a posteriori aproximadas para los elementos del vector de hiperparámetros $\tilde{p}(\theta_k | \bm{y})$ se pueden obtener usando un algoritmo de interpolación basado en los valores de $\tilde{p}{\bm{\theta} | \bm{y}}$ evaluada en los puntos $\{ \bm{\theta}_k^{(j)} \}$.
+
+Las marginales a posteriori aproximadas para los elementos del campo latente $\tilde{p}(x_i | \bm{y})$ se obtienen evaluando las condicionales a posteriori $\tilde{p}(x_i |\bm{\theta}, \bm{y})$, para cada valor de $\{ \bm{\theta}_k^{(j)} \}$, en una grilla de valores seleccionados de $x_i$, e integrando numéricamente mediante una suma finita ponderada:
+
+\begin{equation} \label{20}
+    p(x_i | \bm{y}) \approx \sum_j{ \tilde{p}(x_i | \bm{\theta}^{(j)}, \bm{y}) \tilde{p}(\bm{\theta}^{(j)} | \bm{y}) \Delta_j}
+\end{equation}
+
+La ponderación se hace mediante los pesos $\{ \Delta_j \}$ que corresponden a los puntos de integracion $\{ \bm{\theta}^{(j)} \}$. La formula para el calculo de los pesos $\{ \Delta_j \}$ bajo la estrategia CCD puede encontrarse en la Seccion 6.5 de Rue \textit{et al.}, 2005. 
+
+
+
+% notas biblio
+\subsection{Notas bibliográficas}
+Las definiciones de los terminos relacionados con inferencia Bayesiana estan extraidos de Blangiardo y Cameletti (2015) y Gomez-Rubio (2020). Las definiciones y conceptos relacionados con GMRF fueron extraidos de Rue y Held (2005). El desarrollo de la seccion de INLA esta basado en el paper original de Rue et \textit{al.} (2005) y en la lectura de este paper que hacen Blangiardo y Cameletti (2015). 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\end{document}

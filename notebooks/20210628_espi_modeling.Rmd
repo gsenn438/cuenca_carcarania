@@ -1,0 +1,1916 @@
+---
+title: "Untitled"
+author: "Guillermina Senn"
+date: "6/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+library(INLA)
+library(brinla)
+
+library(sp)
+library(sf)
+library(spdep)
+library(rgdal)
+library(gdalUtils)
+
+library(PerformanceAnalytics)
+library(corrplot)
+library(car)
+library(MASS)
+library(ranger)
+
+library(stringr)
+library(dplyr)
+
+library(tmap)
+library(mapview)
+library(leaflet)
+library(ggplot2)
+library(GGally)
+library(RColorBrewer) 
+library(ggcorrplot)
+```
+
+## 1. Cargar los datos
+
+```{r}
+others <-  c('zone', "Name", "description", "timestamp", "begin", "end", 
+             "altitudeMode", "tessellate", "extrude", "visibility", "drawOrder", 
+             "icon", "count", "system_index", "label")
+```
+
+### 1.1 Sin seleccion 
+
+  Uso todo excepto lo siguiente:
+  
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+  
+```{r}
+data <- st_read(
+  dsn = '../data/processed/cuenca/variable_options/espi_ltt_25_no_selection.gpkg'
+)
+cols_delete <- c(others)
+cols_remain <- names(data)[!(names(data) %in% cols_delete)]
+data_ss <- as.data.frame(data) %>%
+ dplyr::select(cols_remain)
+st_geometry(data_ss) <- data_ss$geom
+dim(data_ss)
+names(data_ss)
+```
+
+  La formula sera:
+  
+```{r}
+formula_ss <- Media_ESPI.LTT ~ (Media_ARCILLA + Media_ARENA + Media_CC+                             
+                                Media_CE + Media_CEextsat + Media_CIC+                                      
+Media_CO+Media_Cu+ Media_Fe+                                       
+Media_K+Media_Mg+                                       
+Media_Mn+ Media_Na+                                       
+Media_Nt+Media_P+                                        
+Media_pH+Media_Zn+                                       
+Monte_Porc+                                     
+Arbustales.y.matorrales_Porc+Pastizal.natural_Porc+                          
+Pastizal.natural.con.rocas.o.suelo.desnudo_Porc+
+Rocas_Porc + Suelo.desnudo_Porc + 
+  Cuerpos.de.agua_Porc + I(Cuerpos.de.agua_Porc^2) +
+  Zonas.anegables_Porc + Cursos.de.agua_Porc+Zona.urbana.consolidada_Porc +                   
+Zona.urbana.en.proceso.de.consolidación_Porc + Zona.urbana.sin.consolidar_Porc +                
+Infraestructura.vial_Porc + Actividades.invernales_Porc +                    
+Actividades.estivales_Porc + Actividades.anuales..doble.ciclo._Porc +         
+Sin.actividad.significativa_Porc + Cultivos.anuales.irrigados_Porc +                
+Pasturas.implantadas_Porc + Pasturas.naturales.manejadas_Porc +              
+Media_DEM +I(Media_DEM^2) + Media_MO + Media_PEND + 
+  Media_Recurrecia + I(Media_Recurrecia^2) + 
+  Media_VUT + I(Media_VUT^2))
+```
+
+### 1.2 PCA para todas
+ 
+  Uso todo excepto lo siguiente, pero rotado para tener columnas ortogonales:
+  
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+
+```{r}
+data_pca <- st_read(
+  dsn = '../data/processed/cuenca/variable_options/espi_ltt_25_pca_all.gpkg'
+)
+dim(data_pca)
+# names(data_pca)
+```
+ 
+  La formula sera:
+```{r}
+formula_pca <- Media_ESPI.LTT ~ (PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7
+                                     + PC8 + PC9 + PC10 + PC11 + PC12 + PC13
+                                     + PC14 + PC15 + PC16 + PC17 + PC18 + PC19 
+                                     + PC20 + PC21 + PC22 + PC23 + PC24 + PC25
+                                     + PC26 + PC27 + PC28 + PC29 + PC30 + PC31
+                                     + PC32 + PC33 + PC34 + PC35 + PC36 + PC37
+                                     + PC38 + PC39 + PC40 + PC41 + PC42)
+```
+
+
+### 1.3 PCA para el 80% de la variabilidad
+ 
+  Uso todo excepto lo siguiente, pero rotado para tener columnas ortogonales, y seleccionando solo las primeras 15 PC, que suman el 80% de la variabilidad:
+  
+  * variables sin informacion (salina, perennes)
+  * variables que son CL (aliased);
+  * respuestas (cos, tov, espi.mean, lpd)
+  * NDVI
+
+```{r}
+data_pca80 <- st_read(
+  dsn = '../data/processed/cuenca/variable_options/espi_ltt_25_pca_all_80.gpkg'
+)
+dim(data_pca80)
+# names(data_pca80)
+```
+
+  La formula sera:
+```{r}
+formula_pca_80 <- Media_ESPI.LTT ~ (PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + PC7
+                                     + PC8 + PC9 + PC10 + PC11 + PC12 + PC13
+                                     + PC14 + PC15)
+```
+
+
+## 2. Modelado
+
+  Voy a usar 4 posibles modelos (todos asumiendo respuesta normal): 
+  
+  1. modelo lineal clasico;
+  2. modelo lineal mixto con intercepto aleatorio;
+  3. modelo lineal con efectos espaciales CAR (Besag); y
+  4. modelo espacial BYM. 
+  
+  Por ahora todos los modelos seran con priors por default. 
+  
+  Para cada modelo voy a usar las 3 combinaciones de datos: 
+  * ss: sin seleccion (todas las variables);
+  * pca: solo componentes principales;
+  * pca80: solo las primeras 15 componentes principales.
+  
+  El chequeo del modelo se hara con graficos de residuos, PIT y CPO.
+  La seleccion del modelo se hara con criterios de informacion (AIC, DIC, WAIC), cross-validacion e indices resumen (MSE, R2, sumCPO).
+  La cross-validacion por ahora no la hago, pero la idea seria hacer spatial-cv para todos (tengo que escribir el algoritmo).
+  
+  Cargo el dataset original para agregarle los predichos y poder hacer comparaciones.
+
+```{r, cache=TRUE}
+data_raw <- st_read(
+  dsn = '../data/processed/cuenca/cuenca_25.gpkg'
+)
+data <- data.frame(data_raw)
+for (col in names(data)[names(data) != 'geom']){
+  data[, col] <- replace(data[, col], 
+                         (data[, col] == Inf) + (data[, col] == -Inf) > 0, 
+                         NA)
+}
+st_geometry(data) <- data$geom
+```
+  
+  Los predichos se calculan como la esperanza a posteriori de la distribucion de cada predicho.
+```{r}
+# Use 4 cores to process marginals in parallel
+library("parallel")
+options(mc.cores = 4)
+
+# Transform marginals (if needed) and compute posterior mean
+# marginals: List of `marginals.fitted.values`from inla model
+tmarg <- function(marginals) {
+  post.means <- mclapply(marginals, function (marg) {
+
+  # Compute posterior mean
+  inla.emarginal(function(x) x, marg)
+  })
+
+  return(as.vector(unlist(post.means)))
+}
+
+# extract sd
+sd_inla <- function(marginals){
+  sd_s <- mclapply(
+    X = m1_ss$marginals.fitted.values, 
+    FUN = function(x) return(inla.zmarginal(x, silent = TRUE)$sd)
+  )
+  return(as.vector(unlist(sd_s)))
+}
+```
+
+### 2.1 Modelo 1: Regresion lineal multiple
+
+$$y | \beta, \tau_{\varepsilon} \sim N(X \beta, \tau_{\varepsilon}^{-1} I)$$
+
+$$\varepsilon_i \sim N(0, \sigma_{\varepsilon}^2)$$
+
+Asumimos que $\beta$ y $\tau$ son independientes, entonces la distribucion conjunta a posteriori de los parametros es:
+
+$$p(\beta, \tau_{\varepsilon} | X, y) \propto L(\beta, \tau_{\varepsilon}|X, y) p(\beta) p(\tau_{\varepsilon})$$
+
+En INLA asumimos que el modelo es gaussiano latente y por tanto debemos asignarle una prior gaussiana a $\beta$; para $\tau$, que es un hiperparametro, asumimos una prior difusa. Tipicamente:
+
+$$\beta \sim N_{p+1}(c_0, V_0)$$
+
+$$\tau_{\varepsilon} = \frac{1}{\sigma_{\varepsilon}^2} \sim Gamma(a_0, b_0)$$
+
+Toda slas cantidades $c_0$, $V_0$, $a_0$ y $b_0$ se asumen conocidas. Usar una Gamma para la hiperprior es conjugada en la regresion normal.
+
+Por default, 
+
+$$\beta_j \sim N(0, 10^6)$$
+
+$$log(\tau_{\varepsilon}) \sim logGamma(1, 10^{-5})$$
+
+
+
+#### 2.1.1 Sin seleccion
+
+```{r}
+m1_ss <- readRDS(file = '../models/regression/clasico_ss.csv')
+# m1_ss <- inla(
+#   formula = formula_ss,
+#   family = 'gaussian',
+#   data = data_ss,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m1_ss, file = '../models/regression/clasico_ss.csv')
+
+# summary(m1_ss)
+# qtm(data, fill = 'fit_m1_ss')
+```
+
+##### 2.1.1.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos 
+  
+```{r}
+data$fit_m1_ss <- m1_ss$summary.fitted.values$mean
+data$res_m1_ss <- (data$Media_ESPI.LTT - data$fit_m1_ss)
+data$fit_sd_m1_ss <-  m1_ss$summary.fitted.values$sd
+data$res_std_m1_ss <- data$res_m1_ss / data$fit_sd_m1_ss
+
+shapiro.test(data$res_std_m1_ss)
+qqnorm(y = data$res_std_m1_ss)
+```
+```{r}
+hist(data$res_std_m1_ss, breaks = 20)
+```
+  Yo diria que este patron de residuos no me gusta mucho, quiza se ve un poco de heterocedasticidad, o una mezcla de patrones. 
+  Otro tema que veo es que los puntos estan muy concentrados alrededor de 1.75 aprox, y pude que la respuesta no haya sido una distribucion normal...
+
+```{r}
+ggplot(data, aes(y = res_std_m1_ss, x = fit_m1_ss)) +
+  geom_point() 
+```
+  Y de hecho lo vemos.. la respuesta no era normal.Podria ser tambien que sea bimodal...? Dificil de modelar. Creo que la mejor aproximacion es la normal.
+  
+```{r}
+hist(data$Media_ESPI.LTT, breaks = 100)
+qqnorm(data$Media_ESPI.LTT)
+```
+ 
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m1_ss)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = res_m1_ss, x = Media_ESPI.LTT)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = res_std_m1_ss, x = Media_ESPI.LTT)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+```{r}
+ggplot(data, aes(y = res_std_m1_ss, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. Veamos cuantos fallaron: 1 solo, no pasa nada. Igual quitamos la observacion del histograma.
+  
+```{r}
+sum(m1_ss$cpo$failure)
+pit <- m1_ss$cpo$pit
+pit <- data.frame(pit)
+names(pit) <- 'pit'
+pit$fit <- data$fit_m1_ss
+summary(pit$pit)
+```
+  
+  No veo un histograma uniforme. Veo que los pit suelen acumularse cerca de 0.5, lo que indica que mis datos estan menos dispersos que lo que me esta diciendo mi modelo. 
+  
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+```{r}
+ggplot(pit, aes(x = fit, y = pit)) +
+  geom_point()
+```
+
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- m1_ss$cpo$cpo
+cpo <- data.frame(cpo[-which(m1_ss$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+cpo$id <- 1:nrow(cpo)
+summary(cpo$cpo) 
+```
+
+```{r}
+ggplot(cpo, aes(x = id, y = cpo)) +
+  geom_point()
+```
+ 
+  *Conclusion*: Se ven patrones en los residuos que podrian indicar heterocedasticidad o una mala eleccion de la distribucion de la respuesta. Podria estar relacionado con la espacialidad. Las desviaciones de los residuos frente a la normalidad no son grandes. Los PIT se ven razonablemente uniformes. No se observan outliers mirando los CPO. 
+
+
+##### 2.1.1.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m1_ss_selection <- c(
+  m1_ss$dic$dic,
+  m1_ss$waic$waic,
+  sum(log(m1_ss$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m1_ss)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+#### 2.1.2 PCA para todas
+
+```{r}
+m1_pca <- readRDS(file = '../models/regression/clasico_pca.csv')
+# m1_pca <- inla(
+#   formula = formula_pca,
+#   family = 'gaussian',
+#   data = data_pca,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m1_pca, file = '../models/regression/clasico_pca.csv')
+# qtm(data, fill = c('fit_m1_pca', 'fit_m1_ss', 'Media_ESPI.LTT'), borders = NULL)
+```
+
+
+##### 2.1.2.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+  
+```{r}
+data$fit_m1_pca <- m1_pca$summary.fitted.values$mean
+data$res_m1_pca <- (data$Media_ESPI.LTT - data$fit_m1_pca)
+data$fit_sd_m1_pca <-  m1_pca$summary.fitted.values$sd
+data$res_std_m1_pca <- data$res_m1_pca / data$fit_sd_m1_pca
+
+shapiro.test(data$res_std_m1_pca)
+qqnorm(y = data$res_std_m1_pca)
+```
+
+```{r}
+hist(data$res_m1_pca, breaks = 20)
+```
+  Se observa heterocedasticidad y otros patrones raros. Peor que con la regresion comun.  
+
+```{r}
+ggplot(data, aes(y = res_m1_pca, x = fit_m1_pca)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m1_pca)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m1_pca, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m1_pca$cpo$failure)
+pit <- data.frame(m1_pca$cpo$pit)
+# pit <- data.frame(pit[-which(m1_pca$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma no es uniforme pero es mas uniforme que en la regresion anterior.   
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m1_pca$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m1_pca$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Se ven heterocedasticidad y patrones en los residuos. Los residuos se desvian mucho de la normalidad. Los PIT se ven mas uniformes que antes y no se observan outliers. Las predicciones y las posibles violaciones a los supuestos son mas fuertes que antes. 
+
+##### 2.1.2.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m1_pca_selection <- c(
+  m1_pca$dic$dic,
+  m1_pca$waic$waic,
+  sum(log(m1_pca$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m1_pca)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### 2.1.3 80% de la variabilidad
+
+```{r}
+m1_pca_80 <- readRDS(file = '../models/regression/clasico_pca_80.csv')
+# m1_pca_80 <- inla(
+#   formula = formula_pca_80,
+#   family = 'gaussian',
+#   data = data_pca80,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m1_pca_80, file = '../models/regression/clasico_pca_80.csv')
+# qtm(data, fill = c('fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80', 'Media_ESPI.LTT'), borders = NULL)
+```
+
+
+##### 2.1.3.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+  
+```{r}
+data$fit_m1_pca_80 <- m1_pca_80$summary.fitted.values$mean
+data$res_m1_pca_80 <- (data$Media_ESPI.LTT - data$fit_m1_pca_80)
+data$fit_sd_m1_pca_80 <-  m1_pca_80$summary.fitted.values$sd
+data$res_std_m1_pca_80 <- data$res_m1_pca_80 / data$fit_sd_m1_pca_80
+
+shapiro.test(data$res_std_m1_pca_80)
+qqnorm(y = data$res_std_m1_pca_80)
+```
+
+```{r}
+hist(data$res_m1_pca_80, breaks = 20)
+```
+  Se observa heterocedasticidad puntual en 1.95 aprox, y luego algunos patrones restantes, que podrian deberse a la espacialidad, asumo. Lo veo mejor que al PCA total y a la regresion lineal comun. 
+
+```{r}
+ggplot(data, aes(y = res_m1_pca_80, x = fit_m1_pca_80)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m1_pca_80)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m1_pca_80, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m1_pca_80$cpo$failure)
+pit <- data.frame(m1_pca_80$cpo$pit)
+# pit <- data.frame(pit[-which(m1_pca_80$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma es el menos uniforme de todos..
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m1_pca_80$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m1_pca_80$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Se ven heterocedasticidad y patrones en los residuos. Los residuos se desvian mucho de la normalidad. Los PIT se ven mas uniformes que antes y no se observan outliers. Las predicciones y las posibles violaciones a los supuestos son mas fuertes que antes. 
+
+##### 2.1.3.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m1_pca_80_selection <- c(
+  m1_pca_80$dic$dic,
+  m1_pca_80$waic$waic,
+  sum(log(m1_pca_80$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m1_pca_80)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+
+
+
+
+
+### 2.2 Modelo 2: Regresion lineal mixta con intercepto aleatorio
+
+
+### 2.2.1 Sin seleccion
+
+
+```{r}
+m2_ss <- readRDS(file = '../models/regression/re_iid_ss.csv')
+# m2_ss <- inla(
+#   formula = update(formula_ss, . ~ . + f(id_unico, model = 'iid')),
+#   family = 'gaussian',
+#   data = data_ss,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m2_ss, file = '../models/regression/re_iid_ss.csv')
+# qtm(data, fill = c('fit_m2_ss', 'fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80', 'Media_ESPI.LTT'), borders = NULL)
+```
+
+
+##### 2.2.1.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+
+```{r}
+data$fit_m2_ss <- m2_ss$summary.fitted.values$mean
+data$res_m2_ss <- (data$Media_ESPI.LTT - data$fit_m2_ss)
+data$fit_sd_m2_ss <-  m2_ss$summary.fitted.values$sd
+data$res_std_m2_ss <- data$res_m2_ss / data$fit_sd_m2_ss
+
+shapiro.test(data$res_std_m2_ss)
+qqnorm(y = data$res_std_m2_ss)
+```
+
+```{r}
+hist(data$res_std_m2_ss, breaks = 20)
+```
+  Se observa heterocedasticidad puntual en 1.95 aprox, y luego algunos patrones restantes, que podrian deberse a la espacialidad, asumo.  
+
+```{r}
+ggplot(data, aes(y = res_std_m2_ss, x = fit_m2_ss)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m2_ss)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m2_ss, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m2_ss$cpo$failure)
+pit <- data.frame(m2_ss$cpo$pit)
+# pit <- data.frame(pit[-which(m2_ss$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma es el menos uniforme de todos..
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m2_ss$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m2_ss$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Se ven heterocedasticidad y patrones en los residuos. Los residuos se desvian mucho de la normalidad. Los PIT se ven mas uniformes que antes y no se observan outliers. Las predicciones y las posibles violaciones a los supuestos son mas fuertes que antes. 
+
+##### 2.2.1.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m2_ss_selection <- c(
+  m2_ss$dic$dic,
+  m2_ss$waic$waic,
+  sum(log(m2_ss$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m2_ss)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+
+
+
+
+
+### 2.2.2 PCA para todas
+
+
+```{r}
+m2_pca <- readRDS(file = '../models/regression/re_iid_pca.csv')
+# m2_pca <- inla(
+#   formula = update(formula_pca, . ~ . + f(id_unico, model = 'iid')),
+#   family = 'gaussian',
+#   data = data_pca,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m2_pca, file = '../models/regression/re_iid_pca.csv')
+# qtm(data, fill = c('fit_m2_pca', 'fit_m2_ss', 'fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80', 'Media_ESPI.LTT'), borders = NULL)
+```
+
+
+##### 2.2.2.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+  
+```{r}
+data$fit_m2_pca <- m2_pca$summary.fitted.values$mean
+data$res_m2_pca <- (data$Media_ESPI.LTT - data$fit_m2_pca)
+data$fit_sd_m2_pca <-  m2_pca$summary.fitted.values$sd
+data$res_std_m2_pca <- data$res_m2_pca / data$fit_sd_m2_pca
+
+shapiro.test(data$res_std_m2_pca)
+qqnorm(y = data$res_std_m2_pca)
+```
+
+```{r}
+hist(data$res_m2_pca, breaks = 20)
+```
+
+```{r}
+ggplot(data, aes(y = res_m2_pca, x = fit_m2_pca)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m2_pca)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m2_pca, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m2_pca$cpo$failure)
+pit <- data.frame(m2_pca$cpo$pit)
+# pit <- data.frame(pit[-which(m2_pca$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma es el menos uniforme de todos..
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m2_pca$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m2_pca$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Se ven heterocedasticidad y patrones en los residuos. Los residuos se desvian mucho de la normalidad. Los PIT se ven mas uniformes que antes y no se observan outliers. Las predicciones y las posibles violaciones a los supuestos son mas fuertes que antes. 
+
+##### 2.2.2.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m2_pca_selection <- c(
+  m2_pca$dic$dic,
+  m2_pca$waic$waic,
+  sum(log(m2_pca$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m2_pca)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+
+
+
+
+### 2.2.3 PCA 80%
+
+
+```{r}
+m2_pca_80 <- readRDS(file = '../models/regression/re_iid_pca_80.csv')
+# m2_pca_80 <- inla(
+#   formula = update(formula_pca_80, . ~ . + f(id_unico, model = 'iid')),
+#   family = 'gaussian',
+#   data = data_pca80,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m2_pca_80, file = '../models/regression/re_iid_pca_80.csv')
+# qtm(data, fill = c('fit_m2_ss', 'fit_m2_pca', 'fit_m2_pca_80', 
+#                    'fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80', 
+#                    'Media_ESPI.LTT'), borders = NULL)
+```
+
+
+##### 2.2.3.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+```{r}
+data$fit_m2_pca_80 <- m2_pca_80$summary.fitted.values$mean
+data$res_m2_pca_80 <- (data$Media_ESPI.LTT - data$fit_m2_pca_80)
+data$fit_sd_m2_pca_80 <-  m2_pca_80$summary.fitted.values$sd
+data$res_std_m2_pca_80 <- data$res_m2_pca_80 / data$fit_sd_m2_pca_80
+
+shapiro.test(data$res_std_m2_pca_80)
+qqnorm(y = data$res_std_m2_pca_80)
+```
+
+```{r}
+hist(data$res_m2_pca_80, breaks = 20)
+```
+  Se observa heterocedasticidad puntual en 1.95 aprox, y luego algunos patrones restantes, que podrian deberse a la espacialidad, asumo.  
+
+```{r}
+ggplot(data, aes(y = res_m2_pca_80, x = fit_m2_pca_80)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m2_pca_80)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m2_pca_80, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m2_pca_80$cpo$failure)
+pit <- data.frame(m2_pca_80$cpo$pit)
+# pit <- data.frame(pit[-which(m2_pca_80$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma es el menos uniforme de todos..
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m2_pca_80$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m2_pca_80$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Se ven heterocedasticidad y patrones en los residuos. Los residuos se desvian mucho de la normalidad. Los PIT se ven mas uniformes que antes y no se observan outliers. Las predicciones y las posibles violaciones a los supuestos son mas fuertes que antes. 
+
+##### 2.2.3.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m2_pca_80_selection <- c(
+  m2_pca_80$dic$dic,
+  m2_pca_80$waic$waic,
+  sum(log(m2_pca_80$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m2_pca_80)^2) / nrow(data) # sin CV
+)
+```
+
+### 2.3 Modelo 3: Regresion lineal espacial Besag
+
+ Primero creo el dataset espacial y calculo las vecindades.
+  
+```{r}
+class(data)
+adj <- poly2nb(data)
+crds <-  st_coordinates(st_centroid(data))
+plot(adj, coords = crds, pch = 16, cex = 0.01)
+```
+
+  Ahora calculo las matrices de pesos espaciales para los estilos binario y estandarizado por fila.
+
+```{r}
+wb <- nb2mat(adj, style = "B", zero.policy = TRUE) 
+ww <- nb2mat(adj, style = "W", zero.policy = TRUE) 
+```
+
+
+### 2.3.1 Sin seleccion
+
+
+```{r}
+m3_ss <- readRDS(file = '../models/regression/besagproper_ss.csv')
+# m3_ss <- inla(
+#   formula = update(
+#     formula_ss, 
+#     . ~ . + f(id_unico, model = 'besagproper', graph = ww)
+#   ),
+#   family = 'gaussian',
+#   data = data_ss,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m3_ss, file = '../models/regression/besagproper_ss.csv')
+# qtm(data, fill = c('fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80',
+#                    'fit_m2_ss', 'fit_m2_pca', 'fit_m2_pca_80',
+#                    'fit_m3_ss', 
+#                    'Media_ESPI.LTT'), borders = NULL)
+```
+
+
+##### 2.3.1.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+  
+```{r}
+data$fit_m3_ss <- m3_ss$summary.fitted.values$mean
+data$res_m3_ss <- (data$Media_ESPI.LTT - data$fit_m3_ss)
+data$fit_sd_m3_ss <-  m3_ss$summary.fitted.values$sd
+data$res_std_m3_ss <- data$res_m3_ss / data$fit_sd_m3_ss
+
+shapiro.test(data$res_std_m3_ss)
+qqnorm(y = data$res_std_m3_ss)
+```
+
+```{r}
+hist(data$res_m3_ss, breaks = 20)
+```
+  Se observa heterocedasticidad puntual en 1.95 aprox, y luego algunos patrones restantes, que podrian deberse a la espacialidad, asumo. Lo veo mejor que al PCA total y a la regresion lineal comun. 
+
+```{r}
+ggplot(data, aes(y = res_m3_ss, x = fit_m3_ss)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m3_ss)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m3_ss, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m3_ss$cpo$failure)
+pit <- data.frame(m3_ss$cpo$pit)
+# pit <- data.frame(pit[-which(m3_ss$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma es el menos uniforme de todos..
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m3_ss$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m3_ss$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: No se observa casi heterocedasticidad o patrones en los residuos. Las predicciones se ven casi como los datos. Obviamente ajusta bien, pero no se como verificar si no es overfitting. Los PIT tambien se ven mas uniformes. Es el mejor modelo hasta ahora. 
+
+##### 2.3.1.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m3_ss_selection <- c(
+  m3_ss$dic$dic,
+  m3_ss$waic$waic,
+  sum(log(m3_ss$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m3_ss)^2) / nrow(data) # sin CV
+)
+```
+
+
+### 2.3.2 PCA para todas
+
+```{r}
+m3_pca <- readRDS(file = '../models/regression/besagproper_pca.csv')
+# m3_pca <- inla(
+#   formula = update(
+#     formula_pca, 
+#     . ~ . + f(id_unico, model = 'besagproper', graph = ww)
+#   ),
+#   family = 'gaussian',
+#   data = data_pca,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m3_pca, file = '../models/regression/besagproper_pca.csv')
+# qtm(data, fill = c('fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80',
+#                    'fit_m2_ss', 'fit_m2_pca', 'fit_m2_pca_80',
+#                    'fit_m3_ss', 'fit_m3_pca',
+#                    'Media_ESPI.LTT'), borders = NULL)
+```
+
+
+##### 2.3.2.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+```{r}
+data$fit_m3_pca <- m3_pca$summary.fitted.values$mean
+data$res_m3_pca <- (data$Media_ESPI.LTT - data$fit_m3_pca)
+data$fit_sd_m3_pca <-  m3_pca$summary.fitted.values$sd
+data$res_std_m3_pca <- data$res_m3_pca / data$fit_sd_m3_pca
+
+shapiro.test(data$res_std_m3_pca)
+qqnorm(y = data$res_std_m3_pca)
+```
+
+```{r}
+hist(data$res_m3_pca, breaks = 50)
+```
+ Puede haber algunos outliers aca o un poco de heterocedasticidad. Los residuos no son normales porque justamente estan asimetricos, quiza por los outliers. 
+
+```{r}
+ggplot(data, aes(y = res_m3_pca, x = fit_m3_pca)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m3_pca)) +
+  geom_point() 
+```
+
+  Se ve bastante aleatorio todo, quiza algunos outliers.
+  
+```{r}
+ggplot(data, aes(y = res_m3_pca, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. 4 fallas, los elimino.
+  
+```{r}
+sum(m3_pca$cpo$failure)
+pit <- data.frame(m3_pca$cpo$pit)
+pit <- data.frame(pit[-which(m3_pca$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma no se ve muy uniforme...
+
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m3_pca$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m3_pca$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Esta lindo pero se venos lindo que el besagproper con todas las covariables. Puede haber algun outlier... Por otro lado, aunque PCA total me modifica todo, el patron de residuos se ve menos feo que con RE o clasico, donde no incluia espacialidad. 
+
+##### 2.3.2.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m3_pca_selection <- c(
+  m3_pca$dic$dic,
+  m3_pca$waic$waic,
+  sum(log(m3_pca$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m3_pca)^2) / nrow(data) # sin CV
+)
+```
+
+### 2.3.3 PCA 80%
+
+
+```{r}
+m3_pca_80 <- readRDS(file = '../models/regression/besagproper_pca_80.csv')
+# m3_pca_80 <- inla(
+#   formula = update(
+#     formula_pca_80, 
+#     . ~ . + f(id_unico, model = 'besagproper', graph = ww)
+#   ),
+#   family = 'gaussian',
+#   data = data_pca80,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m3_pca_80, file = '../models/regression/besagproper_pca_80.csv')
+# qtm(data, fill = c('fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80',
+#                    'fit_m2_ss', 'fit_m2_pca', 'fit_m2_pca_80',
+#                    'fit_m3_ss', 'fit_m3_pca', 'fit_m3_pca_80',
+#                    'Media_ESPI.LTT'), borders = NULL)
+```
+
+##### 2.3.3.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+  
+```{r}
+data$fit_m3_pca_80 <- m3_pca_80$summary.fitted.values$mean
+data$res_m3_pca_80 <- (data$Media_ESPI.LTT - data$fit_m3_pca_80)
+data$fit_sd_m3_pca_80 <-  m3_pca_80$summary.fitted.values$sd
+data$res_std_m3_pca_80 <- data$res_m3_pca_80 / data$fit_sd_m3_pca_80
+
+shapiro.test(data$res_std_m3_pca_80)
+qqnorm(y = data$res_std_m3_pca_80)
+```
+
+```{r}
+hist(data$res_m3_pca_80, breaks = 20)
+```
+  Se observa heterocedasticidad puntual en 1.95 aprox, y luego algunos patrones restantes, que podrian deberse a la espacialidad, asumo. Lo veo mejor que al PCA total y a la regresion lineal comun. 
+
+```{r}
+ggplot(data, aes(y = res_m3_pca_80, x = fit_m3_pca_80)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m3_pca_80)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m3_pca_80, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m3_pca_80$cpo$failure)
+pit <- m3_pca_80$cpo$pit
+pit <- data.frame(pit[-which(m3_pca_80$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma es el menos uniforme de todos..
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m3_pca_80$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m3_pca_80$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: No veo grandes diferencias con PCA completo.
+
+##### 2.3.3.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m3_pca_80_selection <- c(
+  m3_pca_80$dic$dic,
+  m3_pca_80$waic$waic,
+  sum(log(m3_pca_80$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m3_pca_80)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+### 2.4 Modelo 4: Regresion lineal espacial BYM
+
+
+### 2.4.1 Sin selecion
+
+```{r}
+temp <- poly2nb(data)
+nb2INLA('espi.ltt_graph', temp)
+adj_path <- paste(getwd(), '/espi.ltt_graph', sep = '')
+```
+
+```{r}
+m4_ss <- readRDS(file = '../models/regression/bym_ss.csv')
+# m4_ss <- inla(
+#   formula = update(
+#     formula_ss, 
+#     . ~ . + f(id_unico, model = 'bym', graph = adj_path, scale.model = TRUE)
+#   ),
+#   family = 'gaussian',
+#   data = data_ss,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m4_ss, file = '../models/regression/bym_ss.csv')
+# qtm(data, fill = c('Media_ESPI.LTT',
+#                    'fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80',
+#                    'fit_m2_ss', 'fit_m2_pca', 'fit_m2_pca_80',
+#                    'fit_m3_ss', 'fit_m3_pca', 'fit_m3_pca_80',
+#                    'fit_m4_ss'), borders = NULL)
+```
+
+
+##### 2.4.1.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+  
+```{r}
+data$fit_m4_ss <- m4_ss$summary.fitted.values$mean
+data$res_m4_ss <- (data$Media_ESPI.LTT - data$fit_m4_ss)
+data$fit_sd_m4_ss <-  m4_ss$summary.fitted.values$sd
+data$res_std_m4_ss <- data$res_m4_ss / data$fit_sd_m4_ss
+
+shapiro.test(data$res_std_m4_ss)
+qqnorm(y = data$res_std_m4_ss)
+```
+
+```{r}
+hist(data$res_m4_ss, breaks = 20)
+```
+
+
+```{r}
+ggplot(data, aes(y = res_m4_ss, x = fit_m4_ss)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m4_ss)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m4_ss, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m4_ss$cpo$failure)
+pit <- m4_ss$cpo$pit
+pit <- data.frame(pit[-which(m4_ss$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+  Se ve bastante uniforme!
+  
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- m4_ss$cpo$cpo
+cpo <- data.frame(cpo[-which(m4_ss$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Es el que mas me gusta hasta ahora.
+
+##### 2.4.1.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m4_ss_selection <- c(
+  m4_ss$dic$dic,
+  m4_ss$waic$waic,
+  sum(log(m4_ss$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m4_ss)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+### 2.4.2 PCA para todas
+
+
+
+```{r}
+m4_pca <- readRDS(file = '../models/regression/bym_pca.csv')
+# m4_pca <- inla(
+#   formula = update(
+#     formula_pca, 
+#     . ~ . + f(id_unico, model = 'bym', graph = adj_path, scale.model = TRUE)
+#   ),
+#   family = 'gaussian',
+#   data = data_pca,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m4_pca, file = '../models/regression/bym_pca.csv')
+# qtm(data, fill = c('Media_ESPI.LTT',
+#                    'fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80',
+#                    'fit_m2_ss', 'fit_m2_pca', 'fit_m2_pca_80',
+#                    'fit_m3_ss', 'fit_m3_pca', 'fit_m3_pca_80',
+#                    'fit_m4_ss', 'fit_m4_pca'), borders = NULL)
+```
+
+
+
+
+##### 2.4.2.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+
+```{r}
+data$fit_m4_pca <- m4_pca$summary.fitted.values$mean
+data$res_m4_pca <- (data$Media_ESPI.LTT - data$fit_m4_pca)
+data$fit_sd_m4_pca <-  m4_pca$summary.fitted.values$sd
+data$res_std_m4_pca <- data$res_m4_pca / data$fit_sd_m4_pca
+
+shapiro.test(data$res_std_m4_pca)
+qqnorm(y = data$res_std_m4_pca)
+```
+
+```{r}
+hist(data$res_m4_pca, breaks = 20)
+```
+  Se observa heterocedasticidad puntual en 1.95 aprox, y luego algunos patrones restantes, que podrian deberse a la espacialidad, asumo. Lo veo mejor que al PCA total y a la regresion lineal comun. 
+
+```{r}
+ggplot(data, aes(y = res_m4_pca, x = fit_m4_pca)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m4_pca)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m4_pca, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m4_pca$cpo$failure)
+pit <- m4_pca$cpo$pit
+pit <- data.frame(pit[-which(m4_pca$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+  
+El histograma es el menos uniforme de todos..
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m4_pca$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m4_pca$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Mucha desviacion en los residuos. El ajuste esta bien. 
+
+##### 2.4.2.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m4_pca_selection <- c(
+  m4_pca$dic$dic,
+  m4_pca$waic$waic,
+  sum(log(m4_pca$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m4_pca)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+### 2.4.3 PCA 80%
+
+```{r}
+m4_pca_80 <- readRDS(file = '../models/regression/bym_pca_80.csv')
+# m4_pca_80 <- inla(
+#   formula = update(
+#     formula_pca_80, 
+#     . ~ . + f(id_unico, model = 'bym', graph = adj_path, scale.model = TRUE)
+#   ),
+#   family = 'gaussian',
+#   data = data_pca80,
+#   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+# )
+# saveRDS(m4_pca_80, file = '../models/regression/bym_pca_80.csv')
+# qtm(data, fill = c('Media_ESPI.LTT',
+#                    'fit_m1_ss', 'fit_m1_pca', 'fit_m1_pca_80',
+#                    'fit_m2_ss', 'fit_m2_pca', 'fit_m2_pca_80',
+#                    'fit_m3_ss', 'fit_m3_pca', 'fit_m3_pca_80',
+#                    'fit_m4_ss', 'fit_m4_pca', 'fit_m4_pca_80'), borders = NULL)
+```
+
+##### 2.4.3.1 Chequeo de supuestos
+
+  Primero: Verificacion de distribuciones a priori
+  Asi verifico la especificacion de los hiperparametros. Tenemos un solo hiperparametro, la log precision, modelada a priori con una logGamma. 
+
+```{r}
+# m1_ss$.args$control.predictor$hyper
+```
+
+  2. Residuos vs. predichos, observaciones vs. predichos.
+  
+```{r}
+data$fit_m4_pca_80 <- m4_pca_80$summary.fitted.values$mean
+data$res_m4_pca_80 <- (data$Media_ESPI.LTT - data$fit_m4_pca_80)
+data$fit_sd_m4_pca_80 <-  m4_pca_80$summary.fitted.values$sd
+data$res_std_m4_pca_80 <- data$res_m4_pca_80 / data$fit_sd_m4_pca_80
+
+shapiro.test(data$res_std_m4_pca_80)
+qqnorm(y = data$res_std_m4_pca_80)
+```
+
+```{r}
+hist(data$res_m4_pca_80, breaks = 20)
+```
+  Se observa heterocedasticidad puntual en 1.95 aprox, y luego algunos patrones restantes, que podrian deberse a la espacialidad, asumo. Lo veo mejor que al PCA total y a la regresion lineal comun. 
+
+```{r}
+ggplot(data, aes(y = res_m4_pca_80, x = fit_m4_pca_80)) +
+  geom_point() 
+```
+
+```{r}
+ggplot(data, aes(y = Media_ESPI.LTT, x = fit_m4_pca_80)) +
+  geom_point() 
+```
+
+  No estoy segura de ver un patron totalmente aleatorio si ploteo los residuos vs. el id de zona, que esta relacionado con su ubicacion.
+  
+```{r}
+ggplot(data, aes(y = res_m4_pca_80, x = id_unico)) +
+  geom_point() 
+```
+
+  Ahora, PIT y CPO. No falla ninguno.
+  
+```{r}
+sum(m4_pca_80$cpo$failure)
+pit <- data.frame(m4_pca_80$cpo$pit)
+# pit <- data.frame(pit[-which(m4_pca_80$cpo$failure > 0)])
+names(pit) <- 'pit'
+summary(pit$pit)
+```
+ 
+  No es muy uniforme el histograma.
+  
+```{r}
+ggplot(pit, aes(x = pit)) +
+  geom_histogram(binwidth = 0.05)
+```
+
+  En realidad no se ven desviaciones tan grandes de la distribucion uniforme...
+  
+```{r}
+qqplot(qunif(ppoints(nrow(pit))),
+       pit$pit, pch = 16, cex = 0.2)
+qqline(pit$pit, 
+       distribution = function(p) qunif(p), prob = c(0.1, 0.9))
+```
+
+  A los CPO no termino de entender bien como mirarlos individualmente. 
+  
+```{r}
+cpo <- data.frame(m4_pca_80$cpo$cpo)
+# cpo <- data.frame(cpo[-which(m4_pca_80$cpo$failure > 0)])
+names(cpo) <- 'cpo'
+summary(cpo$cpo)
+```
+
+```{r}
+hist(cpo$cpo)
+```
+ 
+  *Conclusion*: Un poco menos desviado que el PCA total, pero peor que los datos originales.
+
+##### 2.4.3.2 Seleccion de modelos
+
+  Aca computamos criterios de informacion y medidas resumen. 
+
+```{r}
+m4_pca_80_selection <- c(
+  m4_pca_80$dic$dic,
+  m4_pca_80$waic$waic,
+  sum(log(m4_pca_80$cpo$cpo)),
+  sum((data$Media_ESPI.LTT - data$fit_m4_pca_80)^2) / nrow(data) # sin CV
+)
+```
+
+
+
+
+
+## 3. Comparacion de modelos
+
+```{r}
+name_cols <- c('dic', 'waic', 'log_cpo', 'mse')
+a <- rbind(m1_ss_selection, m1_pca_selection, m1_pca_80_selection,
+      m2_ss_selection, m2_pca_selection, m2_pca_80_selection,
+      m3_ss_selection, m3_pca_selection, m3_pca_80_selection, 
+      m4_ss_selection, m4_pca_selection, m4_pca_80_selection)
+results <- data.frame(a)
+names(results) <- name_cols
+```
+  Veamos los resultados.
+  
+  Ordenando por todas las medidas, gana el BYM con datos originales.
+  
+  En general, mirando el log_cpo, el m4_Ss y m3_ss estan aprox. en el mismo nivel, pero mucho mas arriba que los modelos sin efectos espaciales. Tambien resultan mucho mejores que usando PCA. Sin embargo los modelos espaciales con PCA full quedan casi al nivel de los modelos sin efectos espaciales.
+  
+```{r}
+results <- results %>%
+  arrange(desc(log_cpo)) %>%
+  mutate(model = row.names(results)) %>%
+  print
+write.csv(x = results, file = '../models/regression/20210706_model_selection.csv',
+          row.names = FALSE)
+```
+
+```{r}
+read.csv(file = '../models/regression/20210706_model_selection.csv')
+```
+
+## 4. Validacion de modelos
+
+```{r}
+data$pit_m1_ss <- m1_ss$cpo$pit
+data$cpo_m1_ss <- m1_ss$cpo$cpo
+data$pit_m1_pca <- m1_pca$cpo$pit
+data$cpo_m1_pca <- m1_pca$cpo$cpo
+data$pit_m1_pca_80 <- m1_pca_80$cpo$pit
+data$cpo_m1_pca_80 <- m1_pca_80$cpo$cpo
+
+data$pit_m2_ss <- m2_ss$cpo$pit
+data$cpo_m2_ss <- m2_ss$cpo$cpo
+data$pit_m2_pca <- m2_pca$cpo$pit
+data$cpo_m2_pca <- m2_pca$cpo$cpo
+data$pit_m2_pca_80 <- m2_pca_80$cpo$pit
+data$cpo_m2_pca_80 <- m2_pca_80$cpo$cpo
+
+data$pit_m3_ss <- m3_ss$cpo$pit
+data$cpo_m3_ss <- m3_ss$cpo$cpo
+data$pit_m3_pca <- m3_pca$cpo$pit
+data$cpo_m3_pca <- m3_pca$cpo$cpo
+data$pit_m3_pca_80 <- m3_pca_80$cpo$pit
+data$cpo_m3_pca_80 <- m3_pca_80$cpo$cpo
+
+data$pit_m4_ss <- m4_ss$cpo$pit
+data$cpo_m4_ss <- m4_ss$cpo$cpo
+data$pit_m4_pca <- m4_pca$cpo$pit
+data$cpo_m4_pca <- m4_pca$cpo$cpo
+data$pit_m4_pca_80 <- m4_pca_80$cpo$pit
+data$cpo_m4_pca_80 <- m4_pca_80$cpo$cpo
+```
+
+```{r}
+val <- data %>%
+  select(
+    Media_ESPI.LTT, id_unico,
+    fit_m1_ss, fit_sd_m1_ss, res_m1_ss, res_std_m1_ss, pit_m1_ss, cpo_m1_ss,
+    fit_m1_pca, fit_sd_m1_pca, res_m1_pca, res_std_m1_pca, pit_m1_pca, cpo_m1_pca,
+    fit_m1_pca_80, fit_sd_m1_pca_80, res_m1_pca_80, res_std_m1_pca_80, pit_m1_pca_80, cpo_m1_pca_80,
+    fit_m2_ss, fit_sd_m2_ss, res_m2_ss, res_std_m2_ss, pit_m2_ss, cpo_m2_ss,
+    fit_m2_pca, fit_sd_m2_pca, res_m2_pca, res_std_m2_pca, pit_m2_pca, cpo_m2_pca,
+    fit_m2_pca_80, fit_sd_m2_pca_80, res_m2_pca_80, res_std_m2_pca_80, pit_m2_pca_80, cpo_m2_pca_80,
+    fit_m3_ss, fit_sd_m3_ss, res_m3_ss, res_std_m3_ss, pit_m3_ss, cpo_m3_ss,
+    fit_m3_pca, fit_sd_m3_pca, res_m3_pca, res_std_m3_pca, pit_m3_pca, cpo_m3_pca,
+    fit_m3_pca_80, fit_sd_m3_pca_80, res_m3_pca_80, res_std_m3_pca_80, pit_m3_pca_80, cpo_m3_pca_80,
+    fit_m4_ss, fit_sd_m4_ss, res_m4_ss, res_std_m4_ss, pit_m4_ss, cpo_m4_ss,
+    fit_m4_pca, fit_sd_m4_pca, res_m4_pca, res_std_m4_pca, pit_m4_pca, cpo_m4_pca,
+    fit_m4_pca_80, fit_sd_m4_pca_80, res_m4_pca_80, res_std_m4_pca_80, pit_m4_pca_80, cpo_m4_pca_80
+  ) %>%
+  print
+st_write(
+  obj = val, 
+  dsn = '../models/regression/20210706_model_validation.gpkg',
+  layer = '20210706_model_validation'
+)
+```
+
+
+
+```{r}
+test <- st_read(
+  dsn = '../models/regression/20210706_model_validation.gpkg',
+  layer = '20210706_model_validation'
+)
+```
+
+```{r}
+test
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```

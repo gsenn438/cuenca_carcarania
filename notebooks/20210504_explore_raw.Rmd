@@ -15,7 +15,7 @@ library(tmap)
 ```
 
 ```{r}
-path <- '../data/external/data/capas_sig/'
+path <- '../data/raw/capas_sig/'
 ```
 
 ## 1. Coberturas
@@ -173,8 +173,6 @@ plot(wdpa, max.plot = 5)
    
 ## 3. Edaficas_geologicas
 
-
-
 ```{r}
 cartas <- st_read(
   dsn = paste(path, 'edaficas_geologicas/Cartas_suelo', sep = ''),
@@ -186,6 +184,8 @@ names(cartas)
 ```{r}
 plot(cartas['ip'])
 ```
+
+
 ```{r}
 limit <- st_read(
   dsn = paste(path, 'edaficas_geologicas/Limitantes_edaficas', sep = ''),
